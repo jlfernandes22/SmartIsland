@@ -8,8 +8,8 @@
 package com.agupta07505.smartisland.shizuku
 
 import android.content.Context
-import android.os.CountDownLatch
 import android.util.Log
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
 
