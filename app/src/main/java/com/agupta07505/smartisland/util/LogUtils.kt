@@ -14,6 +14,10 @@ import kotlinx.coroutines.CancellationException
 inline fun <T> runCatchingLogged(tag: String, message: String = "Operation failed", block: () -> T): T? {
     return try {
         block()
+    } catch (e: CancellationException) {
+        // Never swallow cancellation — doing so breaks structured concurrency
+        // whenever this helper wraps suspending calls inside coroutines.
+        throw e
     } catch (e: Exception) {
         try {
             if (BuildConfig.DEBUG) {

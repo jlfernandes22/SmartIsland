@@ -49,7 +49,9 @@ import com.agupta07505.smartisland.util.HotspotUtil
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 
 private data class IdleDeviceState(
     val timeText: String,
@@ -68,9 +70,11 @@ fun IdleInfoExpanded(
     feedback: String? = null
 ) {
     val context = LocalContext.current
+    // Battery/BT/hotspot reads are binder + reflection calls; run them on IO so
+    // the 1s menu refresh never janks the overlay's main thread.
     val state by produceState(initialValue = IdleDeviceState("", "", "", false, "", false, "")) {
         while (true) {
-            value = readDeviceState(context)
+            value = withContext(Dispatchers.IO) { readDeviceState(context) }
             delay(1000L)
         }
     }

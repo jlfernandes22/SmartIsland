@@ -18,6 +18,11 @@ import android.widget.Toast
 
 object HotspotUtil {
 
+    // Resolved once: getMethod() is surprisingly expensive and this check runs
+    // every second from the idle info menu's state poll.
+    @Volatile
+    private var wifiApStateMethod: java.lang.reflect.Method? = null
+
     /**
      * Best-effort live tethering state detection via the legacy WifiManager API.
      * Returns true/false when readable, null when the platform blocks reflection
@@ -28,8 +33,10 @@ object HotspotUtil {
             val wifiManager = context.applicationContext
                 .getSystemService(Context.WIFI_SERVICE) as? android.net.wifi.WifiManager
                 ?: return null
-            val stateMethod = wifiManager.javaClass.getMethod("getWifiApState")
-            val state = stateMethod.invoke(wifiManager) as? Int ?: return null
+            val method = wifiApStateMethod ?: wifiManager.javaClass
+                .getMethod("getWifiApState")
+                .also { wifiApStateMethod = it }
+            val state = method.invoke(wifiManager) as? Int ?: return null
             // WIFI_AP_STATE_ENABLED = 13, WIFI_AP_STATE_ENABLING = 12
             state == 13 || state == 12
         }.getOrNull()

@@ -84,8 +84,20 @@ object ShizukuManager {
 
             val process = newProcessMethod.invoke(null, arrayOf("sh", "-c", fullScript), null, null) as Process
 
+            // Drain stderr on a helper thread: if the remote process fills its
+            // stderr pipe while this thread blocks reading stdout (or vice
+            // versa) the command deadlocks forever — which would leave the
+            // island window stuck with FLAG_NOT_TOUCHABLE during a toggle.
+            val errorBuilder = java.lang.StringBuffer()
+            val errorDrainer = Thread {
+                runCatching {
+                    BufferedReader(InputStreamReader(process.errorStream)).use { it.readText() }
+                }.getOrNull()?.let { errorBuilder.append(it) }
+            }.apply { isDaemon = true; start() }
+
             val output = BufferedReader(InputStreamReader(process.inputStream)).use { it.readText() }
-            val error = BufferedReader(InputStreamReader(process.errorStream)).use { it.readText() }
+            errorDrainer.join(5000L)
+            val error = errorBuilder.toString()
             val exitCode = process.waitFor()
 
             if (exitCode == 0 || output.isNotBlank() || error.isBlank()) {

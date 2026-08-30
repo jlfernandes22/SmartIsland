@@ -64,8 +64,6 @@ class SmartIslandNotificationListenerService : NotificationListenerService() {
     }
     private val serviceScope =
         CoroutineScope(SupervisorJob() + Dispatchers.Default + coroutineExceptionHandler)
-    private val mainScope =
-        CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate + coroutineExceptionHandler)
 
     @Inject lateinit var repository: SmartIslandSettingsRepository
     @Inject lateinit var notificationRepository: INotificationRepository
@@ -121,7 +119,6 @@ class SmartIslandNotificationListenerService : NotificationListenerService() {
         suppressedKeys.clear()
         iconCache.evictAll()
         serviceScope.cancel()
-        mainScope.cancel()
         super.onDestroy()
     }
 
@@ -634,8 +631,11 @@ class SmartIslandNotificationListenerService : NotificationListenerService() {
             runCatchingLogged(TAG, "sync cancel failed") { cancelNotification(key) }
         }
 
-        // Asynchronous retry with delays for reliability
-        val job = mainScope.launch {
+        // Asynchronous retry with delays for reliability. Runs on the Default
+        // dispatcher: both activeNotifications and cancelNotification are plain
+        // binder calls, and hammering them on the main thread during notification
+        // bursts caused frame drops in the overlay.
+        val job = serviceScope.launch {
             runSuspendCatchingLogged(TAG, "Notification suppression retries failed") {
                 repeat(3) { attempt ->
                     delay(100L * (attempt + 1)) // 100, 200, 300ms
@@ -817,13 +817,37 @@ class SmartIslandNotificationListenerService : NotificationListenerService() {
 
     private fun Any?.toBitmapOrNull(): Bitmap? {
         return when (this) {
-            is Bitmap -> this
+            is Bitmap -> capBitmapSize(this, MAX_EXTRA_BITMAP_SIZE)
             is Icon -> runCatchingLogged(TAG, "Icon toBitmapOrNull failed") {
                 loadDrawable(this@SmartIslandNotificationListenerService)
                     ?.toBitmap(width = 128, height = 128)
             }
             else -> null
         }
+    }
+
+    /**
+     * Keeps the biggest island-list residents bounded: media artwork and OEM
+     * extra bitmaps can arrive far larger than anything the UI ever shows
+     * (e.g. 1024×1024+ album art = 4 MB each), and up to
+     * [MAX_STORED_ISLAND_NOTIFICATIONS] of them are retained at once.
+     */
+    private fun capBitmapSize(bitmap: Bitmap, maxDim: Int): Bitmap {
+        val largestSide = maxOf(bitmap.width, bitmap.height)
+        if (largestSide <= maxDim || largestSide <= 0) return bitmap
+        val scale = maxDim.toFloat() / largestSide
+        val scaled = runCatching {
+            Bitmap.createScaledBitmap(
+                bitmap,
+                (bitmap.width * scale).toInt().coerceAtLeast(1),
+                (bitmap.height * scale).toInt().coerceAtLeast(1),
+                true
+            )
+        }.getOrNull() ?: return bitmap
+        // NOTE: never recycle() the original here — it may still be referenced
+        // by the cached MediaMetadata bundle / notification extras and would
+        // crash later draws with "trying to use a recycled bitmap".
+        return scaled
     }
 
     private fun controllersFor(packageName: String): List<MediaController> =
@@ -859,9 +883,10 @@ class SmartIslandNotificationListenerService : NotificationListenerService() {
         val playbackState = this.playbackState
         val durationMs = metadata?.getLong(MediaMetadata.METADATA_KEY_DURATION)?.takeIf { it > 0 }
         val positionMs = playbackState?.estimatedPosition()
-        val artwork = metadata?.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART)
+        val artwork = (metadata?.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART)
             ?: metadata?.getBitmap(MediaMetadata.METADATA_KEY_ART)
-            ?: metadata?.getBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON)
+            ?: metadata?.getBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON))
+            ?.let { capBitmapSize(it, MAX_ARTWORK_BITMAP_SIZE) }
         return MediaInfo(artwork, positionMs, durationMs, playbackState?.state == PlaybackState.STATE_PLAYING)
     }
 
@@ -893,6 +918,11 @@ class SmartIslandNotificationListenerService : NotificationListenerService() {
         private const val TAG = "SmartIslandNotificationListener"
         private const val ICON_BITMAP_SIZE = 96
         private const val LARGE_ICON_BITMAP_SIZE = 128
+        // MediaMetadata art is usually fine, but some apps push huge art — this
+        // only downscales pathological cases, never typical artwork.
+        private const val MAX_ARTWORK_BITMAP_SIZE = 1024
+        private const val MAX_EXTRA_BITMAP_SIZE = 256
+        private const val MAX_STORED_ISLAND_NOTIFICATIONS = 50
         private const val MAX_SUPPRESSED_KEYS = 100
         private const val SUPPRESSED_KEY_TTL_MS = 10 * 60 * 1000L
         private const val INITIAL_SUPPRESSION_WINDOW_MS = 1500L

@@ -200,7 +200,10 @@ fun WavyMusicSeekBar(
             // We start from the end of the left arc (startX + baseThicknessPx / 2f)
             val pathStartX = startX + baseThicknessPx / 2f
             if (endX > pathStartX) {
-                for (xInt in pathStartX.toInt()..endX.toInt()) {
+                // 3px sampling: wave wavelengths are ≥ ~157px (WAVE_FREQ_1), so
+                // this is visually identical to per-pixel sampling while doing
+                // ~3× less sin/cos work per frame.
+                for (xInt in pathStartX.toInt()..endX.toInt() step WAVE_SAMPLE_STEP_PX) {
                     val x = xInt.toFloat()
                     
                     // Damp the wave near startX and endX so it smoothly meets the flat baseline
@@ -245,5 +248,6 @@ fun WavyMusicSeekBar(
 private val WAVE_FADE_WIDTH = 24.dp
 private const val WAVE_FREQ_1 = 0.04f
 private const val WAVE_FREQ_2 = 0.02f
+private const val WAVE_SAMPLE_STEP_PX = 3
 private const val SCRUB_HOLD_DELAY_MS = 220L
 

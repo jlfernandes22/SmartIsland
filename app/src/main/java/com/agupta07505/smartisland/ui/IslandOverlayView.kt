@@ -113,6 +113,11 @@ fun IslandOverlayView(
     val currentOnOpenNotification by rememberUpdatedState(onOpenNotification)
     val currentExpanded by rememberUpdatedState(expanded)
     val currentSettings by rememberUpdatedState(settings)
+    // Gesture handlers below run inside pointerInput(Unit)-keyed coroutines that
+    // never restart; without these they would capture first-composition values
+    // (opening a stale notification / missing the reply-dismiss on tap-outside).
+    val currentIsInputActive by rememberUpdatedState(isInputActive)
+    val currentNotifications by rememberUpdatedState(notifications)
     val haptic = LocalHapticFeedback.current
 
     val scope = rememberCoroutineScope()
@@ -147,6 +152,7 @@ fun IslandOverlayView(
     val safeIndex = selectedIndex.coerceIn(0, (notifications.size - 1).coerceAtLeast(0))
     val activeNotification = notifications.getOrNull(safeIndex)
     val activeMode = activeNotification?.mode ?: IslandMode.Empty
+    val currentSafeIndex by rememberUpdatedState(safeIndex)
 
     val initialEstimatedHeight = remember(activeMode, notifications.isEmpty()) {
         if (notifications.isEmpty()) 135.dp else defaultEstimatedHeightForMode(activeMode)
@@ -413,7 +419,7 @@ fun IslandOverlayView(
             .fillMaxSize()
             .pointerInput(Unit) {
                 detectTapGestures {
-                    if (isInputActive) {
+                    if (currentIsInputActive) {
                         onReplyStateChanged(false)
                     }
                     currentOnToggle()
@@ -526,7 +532,7 @@ fun IslandOverlayView(
                                         }
                                     } else if (!isDragging || abs(dragOffset) < 10f) {
                                         if (!isHoldRegistered) {
-                                            val currentNotification = notifications.getOrNull(safeIndex)
+                                            val currentNotification = currentNotifications.getOrNull(currentSafeIndex)
                                             if (currentNotification != null && !infoPageActive) {
                                                 currentOnOpenNotification(currentNotification)
                                             } else if (infoPageActive) {

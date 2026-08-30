@@ -165,11 +165,20 @@ class SmartIslandOverlayService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         runCatchingLogged(TAG, "onAccessibilityEvent failed") {
             if (destroyed || !::viewModel.isInitialized) return@runCatchingLogged
-            val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
-            val locked = keyguardManager?.isKeyguardLocked == true
-            if (isLockScreenActive != locked) {
-                isLockScreenActive = locked
-                updateWindowLayoutParams(isWindowExpanded, viewModel.settings.value)
+
+            // Keyguard fallback sync runs ONLY on window transitions:
+            // isKeyguardLocked() is a binder call, and this service also receives
+            // high-frequency TYPE_WINDOW_CONTENT_CHANGED events (list scrolls,
+            // progress bars, ...) that previously triggered it on every tick.
+            // Lock/unlock on content-only changes is already covered by the
+            // SCREEN_ON / SCREEN_OFF / USER_PRESENT receiver above.
+            if (event?.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+                val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
+                val locked = keyguardManager?.isKeyguardLocked == true
+                if (isLockScreenActive != locked) {
+                    isLockScreenActive = locked
+                    updateWindowLayoutParams(isWindowExpanded, viewModel.settings.value)
+                }
             }
 
             if (event?.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
