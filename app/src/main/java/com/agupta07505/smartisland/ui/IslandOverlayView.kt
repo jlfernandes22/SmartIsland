@@ -25,6 +25,7 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.ui.input.pointer.changedToUp
 import androidx.compose.ui.input.pointer.positionChange
 import kotlin.math.abs
+import kotlin.math.roundToInt
 import androidx.compose.runtime.rememberCoroutineScope
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.layout.Box
@@ -99,6 +100,15 @@ fun IslandOverlayView(
     onReplyStateChanged: (Boolean) -> Unit = {},
     onDismissAllNotifications: () -> Unit = {},
     isFullWidth: Boolean = true,
+    // dp offset of the ACTUAL overlay window center from the screen center,
+    // published by SmartIslandOverlayService (0f for any full-width window,
+    // windowXPx/density for the narrow collapsed window). Subtracted from every
+    // rendered x-translation below so the content stays anchored to the SCREEN
+    // instead of the window: the collapsed window only shrinks ~220ms after the
+    // collapse starts, and without the compensation every element rendered
+    // (baseCenter - screenCenter) too far left until the window resized, then
+    // teleported back into place.
+    windowCenterOffsetDp: Float = 0f,
     onOpenIdleInfoItem: (String) -> Unit = {},
     menuFeedback: String? = null,
     reappearTick: Int = 0,
@@ -186,29 +196,19 @@ fun IslandOverlayView(
             compactGap,
             (screenWidth - companionGroupWidth - compactGap).coerceAtLeast(compactGap)
         )
-    // The bubble Boxes are centered by the parent's contentAlignment, and
-    // absoluteOffset translates them from that centered base position.
-    // Full-width windows are centered at the screen center; the narrow collapsed
-    // window is centered on the whole pill group (main pill + companion
-    // bubbles): collapsedMainLeft + (mainWidth + companionGroupWidth) / 2.
-    // Omitting the main pill's half-width here shifted every collapsed
-    // companion offset ~mainWidth/2 too large, pushing the secondary bubble
-    // past the narrow window's right edge (it "snapped right and disappeared"
-    // on collapse, and 3+ bubbles never showed at all).
-    val baseCenter = if (isFullWidth) {
-        screenCenter
-    } else {
-        collapsedMainLeft + (effectiveWidth.dp + companionGroupWidth) / 2f
-    }
-    val collapsedMainOffset = if (isFullWidth) {
-        collapsedMainLeft + effectiveWidth.dp / 2f - screenCenter
-    } else {
-        // Narrow window: the window is centered on the group, so shift the
-        // main pill from the group center back to its own center (the punch
-        // hole) for any companion count. Reduces to screenCenter - baseCenter
-        // for xOffset 0.
-        collapsedMainLeft + effectiveWidth.dp / 2f - baseCenter
-    }
+    // Collapsed offsets are SCREEN-anchored: target = desiredScreenX -
+    // screenCenter. They are independent of the current window geometry; the
+    // window-relative rendering is recovered at each render site via
+    // "target - windowCenterOffsetDp" (see the parameter docs above):
+    // renderedX = windowCenter + (target - windowCenterOffsetDp) always equals
+    // screenCenter + target, whether the window is full-width (centered on the
+    // screen) or the narrow collapsed window centered on the pill group
+    // (collapsedMainLeft + (mainWidth + companionGroupWidth) / 2). Because the
+    // rendered path no longer depends on which window is active, the service's
+    // delayed narrow-window resize no longer shifts or teleports the content
+    // mid-animation. For full-width devices windowCenterOffsetDp is always 0
+    // and these formulas are identical to the old (window-relative) ones.
+    val collapsedMainOffset = settings.xOffset.dp
     val expandedTopOffset = if (hasCompanion) {
         statusBarHeight.dp.coerceAtLeast(circleSize + compactGap)
     } else {
@@ -410,7 +410,7 @@ fun IslandOverlayView(
     // the next most important notification snaps to the middle (punch-hole position)
     // above the card — only that one stays visible, the others are hidden.
     val collapsedSecondaryOffset = collapsedMainLeft + effectiveWidth.dp + compactGap +
-        circleSize / 2f - baseCenter
+        circleSize / 2f - screenCenter
     val expandedSecondaryLeft = 0.dp
     val secondaryOffset by animateDpAsState(
         targetValue = if (!expanded) collapsedSecondaryOffset else expandedSecondaryLeft,
@@ -421,7 +421,7 @@ fun IslandOverlayView(
     // Tertiary bubble: always a circle, right of the secondary circle when collapsed;
     // hidden while expanded (only the secondary stays next to the expanded card).
     val collapsedTertiaryOffset = collapsedMainLeft + effectiveWidth.dp + compactGap +
-        circleSize + compactGap + circleSize / 2f - baseCenter
+        circleSize + compactGap + circleSize / 2f - screenCenter
     val tertiaryOffset by animateDpAsState(
         targetValue = collapsedTertiaryOffset,
         animationSpec = spring(dampingRatio = 0.75f, stiffness = 520f),
@@ -456,7 +456,10 @@ fun IslandOverlayView(
                     .width(effectiveWidth.dp)
                     .height(effectiveHeight.dp)
                     .graphicsLayer {
-                        translationX = collapsedMainOffset.toPx()
+                        // Screen-anchored: cancel the window-center offset so
+                        // this target tracks the pill wherever the window sits.
+                        translationX = collapsedMainOffset.toPx() -
+                            windowCenterOffsetDp * density
                     }
                     .pointerInput(Unit) {
                         detectTapGestures {
@@ -479,7 +482,11 @@ fun IslandOverlayView(
                 .width(safeWidth)
                 .height(safeHeight)
                 .graphicsLayer {
-                    translationX = animatedXOffset.toPx()
+                    // renderedX = windowCenter + (target - windowCenterOffset)
+                    // = screenCenter + target for every window geometry, so the
+                    // delayed collapse-window resize cannot move the pill.
+                    translationX = animatedXOffset.toPx() -
+                        windowCenterOffsetDp * density
                     translationY = yOffset.toPx() + dragOffset
                     scaleX = switchScaleAnim.value
                     scaleY = switchScaleAnim.value
@@ -668,7 +675,8 @@ fun IslandOverlayView(
                 modifier = Modifier
                     .absoluteOffset {
                         IntOffset(
-                            secondaryOffset.roundToPx(),
+                            secondaryOffset.roundToPx() -
+                                (windowCenterOffsetDp * density).roundToInt(),
                             0
                         )
                     }
@@ -738,7 +746,8 @@ fun IslandOverlayView(
                 modifier = Modifier
                     .absoluteOffset {
                         IntOffset(
-                            tertiaryOffset.roundToPx(),
+                            tertiaryOffset.roundToPx() -
+                                (windowCenterOffsetDp * density).roundToInt(),
                             0
                         )
                     }

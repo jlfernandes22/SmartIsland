@@ -53,6 +53,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -81,6 +83,20 @@ class SmartIslandOverlayService : AccessibilityService() {
     @Volatile private var suppressShadeHide: Boolean = false
     private var collapseJob: kotlinx.coroutines.Job? = null
     private var lastParams: WindowManager.LayoutParams? = null
+    // dp offset of the ACTUAL overlay window center from the screen center,
+    // published for the Compose tree (OverlayIsland -> IslandOverlayView.
+    // windowCenterOffsetDp). 0f whenever the window is full-width (expanded, or
+    // the touchableRegion API works); windowXPx/density for the narrow collapsed
+    // window, which is centered on the pill group (screenCenter + windowXPx).
+    // The Compose tree subtracts this from every rendered x-translation so the
+    // content is anchored to the SCREEN: since the collapsed window only
+    // shrinks ~220ms after the collapse starts, without the compensation every
+    // element rendered (groupCenter - screenCenter) too far left during the
+    // animation and then teleported back when the window resized. Updated in
+    // updateWindowLayoutParams AND collapsedParams, right before the window
+    // relayout, so the recomposition and the window resize land on the same
+    // frame.
+    private val windowCenterOffsetFlow: StateFlow<Float> = MutableStateFlow(0f)
     // Content-sized expanded window (touch-passthrough fallback): reported by the
     // Compose tree when the hidden touchableRegion API is unavailable, so the
     // expanded window can be sized to the card instead of swallowing the screen.
@@ -555,6 +571,7 @@ class SmartIslandOverlayService : AccessibilityService() {
                     OverlayIsland(
                         viewModel = this@SmartIslandOverlayService.viewModel,
                         statusBarHeight = statusBarHeight,
+                        windowCenterOffsetFlow = windowCenterOffsetFlow,
                         onOpenNotification = { notification -> openNotification(notification) },
                         onLaunchApp = { packageName -> launchApp(packageName) },
                         onOpenFloatingWindow = { openCurrentNotificationInFloatingWindow() },
@@ -773,6 +790,13 @@ class SmartIslandOverlayService : AccessibilityService() {
         val mainLeftPx = desiredMainLeftPx.coerceIn(edgePaddingPx, maxMainLeftPx)
         val groupCenterPx = mainLeftPx + groupWidthPx / 2f
         val windowXPx = (groupCenterPx - screenWidthPx / 2f).toInt()
+        // Publish the window-center compensation BEFORE the dedup short-circuit
+        // and before updateViewLayout: 0f for any full-width window (expanded,
+        // or touchableRegion supported), otherwise the narrow window's x offset
+        // (its center is screenCenter + windowXPx). StateFlow dedups equal
+        // values, so re-publishing the same value here is a no-op.
+        windowCenterOffsetFlow.value =
+            if (expanded || isTouchableRegionSupported) 0f else windowXPx / density
 
         val h = if (expanded) {
             if (!isTouchableRegionSupported) {
@@ -890,6 +914,12 @@ class SmartIslandOverlayService : AccessibilityService() {
         val mainLeftPx = desiredMainLeftPx.coerceIn(edgePaddingPx, maxMainLeftPx)
         val groupCenterPx = mainLeftPx + groupWidthPx / 2f
         val windowXPx = (groupCenterPx - screenWidthPx / 2f).toInt()
+        // Initial collapsed window: publish the narrow-window compensation
+        // (0f if the touchableRegion API works, since the window is then
+        // MATCH_PARENT). When reflection succeeds, setupTouchableRegion calls
+        // updateWindowLayoutParams, which re-publishes the correct value.
+        windowCenterOffsetFlow.value =
+            if (isTouchableRegionSupported) 0f else windowXPx / density
 
         val w = if (isTouchableRegionSupported) {
             WindowManager.LayoutParams.MATCH_PARENT
