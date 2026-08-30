@@ -78,6 +78,14 @@ object HotspotUtil {
     }
 
     /**
+     * Kind match for an EXTERNAL interface list (e.g. the platform's
+     * tethered-ifaces answer relayed through the Shizuku user service).
+     * Same prefixes as the in-process classification above.
+     */
+    fun ifacesMatchKind(ifaces: Collection<String>, kind: String): Boolean =
+        ifaces.any { ifaceMatchesKind(it.lowercase(), kind) }
+
+    /**
      * TRUE tethering state for the idle info menu and the Shizuku toggle
      * verification, in decreasing reliability order:
      *  1. TetheringManager.getTetheredIfaces() — the platform's own list.

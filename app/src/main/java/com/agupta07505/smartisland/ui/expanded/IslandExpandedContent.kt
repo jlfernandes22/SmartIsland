@@ -80,7 +80,10 @@ fun IslandExpandedContent(
                 .onSizeChanged {
                     val measuredHeight = with(density) { it.height.toDp() }
                     if (measuredHeight > 0.dp) {
-                        val clamped = measuredHeight.coerceIn(80.dp, 250.dp)
+                        // Same clamp bounds as idleInfoMenuHeightDp's estimate:
+                        // estimate == measurement is what keeps the menu from
+                        // moving after it settles (see IdleInfoExpanded.kt).
+                        val clamped = measuredHeight.coerceIn(IdleInfoMinHeight, IdleInfoMaxHeightDp.dp)
                         onHeightMeasured(clamped)
                     }
                 }
@@ -196,7 +199,7 @@ fun IslandExpandedContent(
 
         fun pageHeightFor(page: Int): Dp {
             if (showInfoPage && page == infoPageIndex) {
-                return infoPageHeight?.coerceIn(80.dp, 250.dp)
+                return infoPageHeight?.coerceIn(IdleInfoMinHeight, IdleInfoMaxHeightDp.dp)
                     ?: com.agupta07505.smartisland.ui.defaultEstimatedHeightForMode(null)
             }
             val notification = notifications.getOrNull(page - pagerOffset) ?: return 135.dp

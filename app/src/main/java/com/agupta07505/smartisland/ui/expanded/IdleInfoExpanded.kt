@@ -45,6 +45,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.agupta07505.smartisland.data.SmartIslandSettings
@@ -67,6 +68,47 @@ private data class IdleDeviceState(
     val usbTetheringText: String,
     val btTetheringText: String
 )
+
+// Height clamp shared with the measured-height reporting in
+// IslandExpandedContent: the estimate must use the SAME clamp as the real
+// measurement or the first measure would move the card after it opened.
+internal val IdleInfoMinHeight = 56.dp
+internal const val IdleInfoMaxHeightDp = 250f
+
+/**
+ * Deterministic natural height of the idle info menu for [settings] inside an
+ * [availableWidthDp]-wide card (the expanded card's inner width). Mirrors the
+ * IdleInfoExpanded layout exactly — 8dp vertical padding, 44dp tiles, 8dp
+ * column gap, 6dp row gap — so IslandOverlayView can initialize the expanded
+ * card height with the SAME value the first real measurement will report.
+ *
+ * When the estimate equals the measured height the card never changes size
+ * after the menu opens, which is what keeps the icon grid perfectly centered
+ * with zero post-settle movement: any late height delta resizes the overlay
+ * window and visibly nudges the content at the end of the settle.
+ */
+fun idleInfoMenuHeightDp(settings: SmartIslandSettings, availableWidthDp: Float): Dp {
+    val tileEnabled = listOf(
+        settings.idleInfoShowTime,
+        settings.idleInfoShowBattery,
+        settings.idleInfoShowBluetooth,
+        settings.idleInfoShowHotspot,
+        settings.idleInfoShowUsbTethering,
+        settings.idleInfoShowBtTethering
+    )
+    val tileCount = tileEnabled.count { it }
+    if (tileCount == 0) {
+        // "All info items are disabled" one-line fallback layout.
+        return 32.dp.coerceIn(IdleInfoMinHeight, IdleInfoMaxHeightDp.dp)
+    }
+    val tileSize = 44f
+    val columnGap = 8f
+    // Greedy FlowRow wrap: n tiles of 44dp + (n-1) gaps fit into the width.
+    val maxPerRow = ((availableWidthDp + columnGap) / (tileSize + columnGap)).toInt().coerceAtLeast(1)
+    val rows = ((tileCount + maxPerRow - 1) / maxPerRow).coerceAtLeast(1)
+    val height = rows * tileSize + (rows - 1) * 6f + 16f
+    return height.dp.coerceIn(IdleInfoMinHeight, IdleInfoMaxHeightDp.dp)
+}
 
 // Minimal palette: icons rest in muted grey and light up with a functional
 // accent only while the radio/tether is actually on. White-on-black, no

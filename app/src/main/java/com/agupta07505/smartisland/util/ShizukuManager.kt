@@ -238,7 +238,7 @@ object ShizukuManager {
     suspend fun toggleBluetooth(enable: Boolean): Result<Boolean> = withContext(Dispatchers.IO) {
         if (!isBinderAvailable() || !hasPermission()) {
             return@withContext Result.failure(
-                IllegalStateException("Shizuku binder offline or API permission not granted")
+                IllegalStateException("Shizuku unavailable")
             )
         }
         val action = if (enable) "enable" else "disable"
@@ -287,7 +287,7 @@ object ShizukuManager {
         withContext(Dispatchers.IO) {
             if (!isBinderAvailable() || !hasPermission()) {
                 return@withContext Result.failure(
-                    IllegalStateException("Shizuku binder offline or API permission not granted")
+                    IllegalStateException("Shizuku unavailable")
                 )
             }
             require(kind in TETHERING_KINDS) { "Unknown tethering kind: $kind" }
@@ -308,9 +308,7 @@ object ShizukuManager {
                     Result.success(true)
                 } else {
                     Result.failure(
-                        IllegalStateException(
-                            "TetheringManager rejected $kind enable=$enable (code $userServiceCode)"
-                        )
+                        IllegalStateException(tetheringErrorText(userServiceCode, kind))
                     )
                 }
             }
@@ -334,9 +332,7 @@ object ShizukuManager {
             }
             if (commands.isEmpty()) {
                 return@withContext Result.failure(
-                    IllegalStateException(
-                        "No tethering mechanism available for $kind (user service unreachable)"
-                    )
+                    IllegalStateException("no mechanism for $kind (user service unreachable)")
                 )
             }
             runShizukuCommands(commands).map { true }
@@ -349,19 +345,43 @@ object ShizukuManager {
      *         could not be reached at all (caller falls back to exec).
      */
     private suspend fun tetheringServiceSetTethering(type: Int, enable: Boolean): Int? {
-        val binder = tetheringServiceBinder() ?: return null
-        val service = try {
-            ITetheringUserService.Stub.asInterface(binder)
-        } catch (t: Throwable) {
-            tetheringServiceBinder = null
-            return null
-        }
+        val service = tetheringUserService() ?: return null
         return try {
             service.setTethering(type, enable)
         } catch (t: Throwable) {
             // DeadObject: the user service process was killed between calls.
             // Drop the cached binder so the next toggle rebinds fresh.
             android.util.Log.w("ShizukuManager", "Tethering user service binder dead", t)
+            tetheringServiceBinder = null
+            null
+        }
+    }
+
+    /**
+     * The platform's live tethered-interface list, read through the user
+     * service (shell uid — not subject to the hidden-API reflection block
+     * that silences the same read in the app process). Returns null when the
+     * service is unreachable or answers with nothing, so the caller falls
+     * back to its in-process readers.
+     */
+    suspend fun tetheredIfacesViaUserService(): List<String>? {
+        val service = tetheringUserService() ?: return null
+        return try {
+            val raw = service.tetheredIfaces
+            if (raw.isBlank()) null else raw.split('|').filter { it.isNotBlank() }
+        } catch (t: Throwable) {
+            android.util.Log.w("ShizukuManager", "Tethering ifaces read failed", t)
+            tetheringServiceBinder = null
+            null
+        }
+    }
+
+    /** Bound user service or null (never blocks long — binder is cached). */
+    private suspend fun tetheringUserService(): ITetheringUserService? {
+        val binder = tetheringServiceBinder() ?: return null
+        return try {
+            ITetheringUserService.Stub.asInterface(binder)
+        } catch (t: Throwable) {
             tetheringServiceBinder = null
             null
         }
@@ -414,6 +434,25 @@ object ShizukuManager {
     /** Valid [toggleTethering] kinds, mirroring the shell command's types. */
     val TETHERING_KINDS = setOf("wifi", "usb", "bluetooth")
 
+    /**
+     * Short, menu-ready text for a failed tethering dispatch. The overlay
+     * shows this verbatim behind "Couldn't toggle X", so the exact failure
+     * stage is visible on-device without logcat:
+     *  - our negative local codes (service-side infra failures), and
+     *  - the platform's positive TETHER_ERROR_* codes (platform refusals).
+     */
+    fun tetheringErrorText(code: Int, kind: String): String = when (code) {
+        TetheringShizukuService.ERR_UNAVAILABLE -> "Shizuku service error"
+        TetheringShizukuService.ERR_TIMEOUT -> "no answer (timeout)"
+        TetheringShizukuService.ERR_STATE_UNCHANGED -> "state did not change"
+        // TetheringManager.TETHER_ERROR_* (positive, stable since API 30).
+        3 -> "unsupported by system"
+        5 -> "system internal error"
+        6 -> "missing TETHER_PRIVILEGED"
+        9 -> "provisioning refused"
+        else -> "system refused (code $code)"
+    }.let { text -> if (kind.isBlank()) text else "$text [$kind]" }
+
     /** kinds → TetheringManager.TETHERING_* types (stable since API 30). */
     private val TETHERING_TYPES = mapOf(
         "wifi" to TetheringShizukuService.TETHERING_WIFI,
@@ -428,7 +467,7 @@ object ShizukuManager {
     /** Connection kept alive for the cached binder (passive afterwards). */
     private var tetheringServiceConnection: ServiceConnection? = null
 
-    /** Bump whenever [TetheringShizukuService] changes shape. */
-    private const val USER_SERVICE_VERSION = 1
+    /** Bump whenever [TetheringShizukuService] or its AIDL changes shape. */
+    private const val USER_SERVICE_VERSION = 2
     private const val USER_SERVICE_BIND_TIMEOUT_MS = 6000L
 }

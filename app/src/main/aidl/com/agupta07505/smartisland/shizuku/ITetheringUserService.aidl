@@ -35,6 +35,20 @@ interface ITetheringUserService {
      */
     int setTethering(int type, boolean enable);
 
+    /**
+     * The platform's live tethered-interface list (TetheringManager
+     * .getTetheredIfaces()) read from the shell-uid process, where the
+     * hidden-API reflection block that silences this read inside the app
+     * process does not apply. Pipe-separated interface names; empty string
+     * when the read is unavailable. Used to verify that a toggle actually
+     * changed the tethering state (HotspotUtil's in-process readers are
+     * reflection-blocked on modern Android and return null/unknown).
+     *
+     * @return pipe-separated lowercase interface names, e.g. "ap0|wlan1",
+     *         or "" when the platform read is unavailable.
+     */
+    String getTetheredIfaces();
+
     /** Shuts the user service process down (standard Shizuku contract). */
     void exit();
 }

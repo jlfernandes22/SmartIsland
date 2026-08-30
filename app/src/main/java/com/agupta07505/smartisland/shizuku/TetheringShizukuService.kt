@@ -71,6 +71,27 @@ class TetheringShizukuService(private val context: Context) : ITetheringUserServ
         }
     }
 
+    /**
+     * The platform's own tethered-interface list, read in the shell-uid
+     * process where hidden-API enforcement does not apply (the app process
+     * gets reflection-blocked on the same read — see HotspotUtil). The app
+     * uses this to VERIFY that a toggle actually changed the tethering state;
+     * a null (empty) answer tells it to fall back to its own readers.
+     */
+    override fun getTetheredIfaces(): String {
+        val manager = tetheringManager() ?: return ""
+        return runCatching {
+            @Suppress("UNCHECKED_CAST")
+            val ifaces = manager.javaClass
+                .getMethod("getTetheredIfaces")
+                .invoke(manager) as? Array<String>
+            ifaces?.joinToString("|") { it.lowercase() } ?: ""
+        }.getOrElse {
+            Log.e(TAG, "getTetheredIfaces failed", it)
+            ""
+        }
+    }
+
     override fun exit() {
         System.exit(0)
     }

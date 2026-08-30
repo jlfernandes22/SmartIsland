@@ -59,6 +59,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
 @AndroidEntryPoint
@@ -576,7 +577,8 @@ class SmartIslandOverlayService : AccessibilityService() {
                         onOpenIdleInfoItem = { item -> openIdleInfoItem(item) },
                         onExpandedWindowContentSize = { widthPx, heightPx ->
                             onExpandedWindowContentSizeChanged(widthPx, heightPx)
-                        }
+                        },
+                        onCollapsedContentFit = { onCollapsedContentFit() }
                     )
                 }
 
@@ -1125,16 +1127,29 @@ class SmartIslandOverlayService : AccessibilityService() {
 
     /**
      * Idle-menu tethering toggles (Wi-Fi hotspot, USB tethering, Bluetooth
-     * tethering), same spirit as the Bluetooth row: TetheringManager through
-     * the Shizuku user service (shell uid holds TETHER_PRIVILEGED) with exec
-     * fallbacks — no dialogs, no settings pages — the island stays visible
-     * and the menu stays open either way. Best-effort: when a state reader is
-     * unavailable the dispatch result is trusted (it is authoritative — the
-     * platform answers through StartTetheringCallback); when the dispatch
-     * fails the user gets in-menu feedback instead of a Toast or a Settings
-     * round-trip.
+     * tethering), same spirit as the Bluetooth row. Layered dispatch:
+     *
+     *  1. TetheringManager through the Shizuku user service (shell uid holds
+     *     TETHER_PRIVILEGED) — the Settings-app path.
+     *  2. Exec fallbacks for the kinds that have one (USB svc functions,
+     *     `cmd wifi stop-softap`).
+     *  3. Quick Settings tile tap through the accessibility service — the
+     *     same gesture machinery as the Bluetooth row's QS fallback — for
+     *     kinds whose dispatch failed. The ROM toggles the radio with the
+     *     user's saved config; no dialogs, no settings pages.
+     *
+     * The island stays visible and the menu stays open on every path; the
+     * result (including the exact failure stage) is shown as in-menu
+     * feedback because this device suppresses Toasts.
      */
     private fun toggleTetheringViaShizuku(kind: String, label: String) {
+        // The user asked for a proactive permission flow on the toggle rows:
+        // when a runtime grant these rows rely on is missing (and was never
+        // rejected), MainActivity opens ON THIS TAP and asks for it while the
+        // toggle itself proceeds in the background (the dispatch runs with
+        // shell-level privileges and needs no app permission — the grants
+        // unblock the in-app state reads and future paths).
+        maybeRequestTogglePermissions()
         // Keep the island fully visible; make its window transparent to touches
         // while the shell command runs (mirrors the Bluetooth toggle path).
         suppressShadeHide = true
@@ -1154,7 +1169,7 @@ class SmartIslandOverlayService : AccessibilityService() {
                     ShizukuManager.toggleTethering(kind, target)
                 } else {
                     Result.failure(
-                        IllegalStateException("Shizuku binder offline (installed=${ShizukuManager.isInstalled(this@SmartIslandOverlayService)})")
+                        IllegalStateException("Shizuku offline")
                     )
                 }
                 // Verify with the best reader available. null = no reliable
@@ -1164,10 +1179,18 @@ class SmartIslandOverlayService : AccessibilityService() {
                 } else {
                     null
                 }
-                val changed = when {
+                var changed = when {
                     dispatched.isFailure -> false
                     verified == null -> true
                     else -> verified == target
+                }
+                // Dispatch failed → last resort: the Quick Settings tile for
+                // this tethering kind, tapped with the accessibility service
+                // (wifi/bluetooth only; USB already has exec fallbacks).
+                var qsFallback = false
+                if (!changed && (kind == "wifi" || kind == "bluetooth")) {
+                    qsFallback = true
+                    changed = toggleTetheringViaQsTile(kind, target)
                 }
                 if (::viewModel.isInitialized) {
                     if (changed) {
@@ -1176,13 +1199,18 @@ class SmartIslandOverlayService : AccessibilityService() {
                         // the auto-collapse window so the menu does not linger.
                         viewModel.resetAutoCollapseTimer()
                     } else {
-                        viewModel.postMenuFeedback("Couldn't toggle $label")
+                        val reason = dispatched.exceptionOrNull()?.message
+                        viewModel.postMenuFeedback(
+                            if (reason.isNullOrBlank()) "Couldn't toggle $label"
+                            else "Couldn't toggle $label — $reason"
+                        )
                     }
                 }
                 android.util.Log.d(
                     TAG,
                     "Tethering toggle $kind: dispatched=${dispatched.isSuccess} " +
-                        "verified=$verified (reason=${dispatched.exceptionOrNull()?.message ?: "ok"})"
+                        "verified=$verified qsFallback=$qsFallback " +
+                        "(reason=${dispatched.exceptionOrNull()?.message ?: "ok"})"
                 )
             }
             // Always restore touch handling, even if the block above threw.
@@ -1190,6 +1218,68 @@ class SmartIslandOverlayService : AccessibilityService() {
             if (::viewModel.isInitialized) {
                 updateWindowLayoutParams(isWindowExpanded, viewModel.settings.value)
             }
+        }
+    }
+
+    /**
+     * Launches MainActivity (single top) with the toggle-permissions extra
+     * when a runtime grant for the tethering rows is missing. Fires at most
+     * once per overlay session so failed toggles never loop the dialog; the
+     * "user has never rejected it" filtering happens in MainActivity, which
+     * is the only place shouldShowRequestPermissionRationale is readable.
+     */
+    private var togglePermissionsRequested = false
+    private fun maybeRequestTogglePermissions() {
+        if (togglePermissionsRequested) return
+        val missing = toggleRowPermissions().any { perm ->
+            runCatchingLogged(TAG, "Permission check failed") {
+                checkSelfPermission(perm) != android.content.pm.PackageManager.PERMISSION_GRANTED
+            } == true
+        }
+        if (!missing) return
+        togglePermissionsRequested = true
+        runCatchingLogged(TAG, "Toggle permission request launch failed") {
+            val intent = Intent(this, com.agupta07505.smartisland.MainActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                .putExtra(
+                    com.agupta07505.smartisland.MainActivity.EXTRA_REQUEST_TOGGLE_PERMISSIONS,
+                    true
+                )
+            startActivity(intent)
+        }
+    }
+
+    /**
+     * Runtime grants the hotspot / tethering toggle rows rely on. The
+     * toggles themselves are dispatched with shell-level privileges through
+     * the Shizuku user service and need NO app permission; these grants
+     * unblock the in-app state readers (Bluetooth adapter queries,
+     * Wi-Fi/hotspot state checks) so the rows can verify and display state.
+     */
+    private fun toggleRowPermissions(): List<String> {
+        val wanted = mutableListOf<String>()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            wanted.add(android.Manifest.permission.BLUETOOTH_CONNECT)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            wanted.add(android.Manifest.permission.NEARBY_WIFI_DEVICES)
+        }
+        return wanted
+    }
+
+    /**
+     * Shell-quality tethered-state read through the Shizuku user service —
+     * the platform's own tethered-interface list, immune to the hidden-API
+     * reflection block that silences the in-process readers. Returns null
+     * when the service is unreachable (caller falls back to in-process).
+     */
+    private suspend fun readTetheringStateWithShell(kind: String): Boolean? {
+        return withContext(Dispatchers.IO) {
+            if (!ShizukuManager.isBinderAvailable() || !ShizukuManager.hasPermission()) {
+                return@withContext null
+            }
+            val ifaces = ShizukuManager.tetheredIfacesViaUserService()
+            ifaces?.let { HotspotUtil.ifacesMatchKind(it, kind) }
         }
     }
 
@@ -1205,10 +1295,12 @@ class SmartIslandOverlayService : AccessibilityService() {
     }
 
     /**
-     * Polls [readTetheringState] until the tethering state reaches [target] or
-     * [timeoutMs] elapses. Returns null as soon as the reader turns out to be
-     * unavailable on this device (nothing to wait for — the caller then trusts
-     * the dispatch result instead).
+     * Polls the tethering state until it reaches [target] or [timeoutMs]
+     * elapses. Reader priority: the Shizuku user service's platform
+     * interface list (shell-quality, immune to hidden-API blocks) first,
+     * then the in-process [readTetheringState] readers. Returns null as soon
+     * as BOTH readers turn out to be unavailable on this device (nothing to
+     * wait for — the caller then trusts the dispatch result instead).
      */
     private suspend fun waitForTetheringState(
         kind: String,
@@ -1216,13 +1308,149 @@ class SmartIslandOverlayService : AccessibilityService() {
         timeoutMs: Long
     ): Boolean? {
         val deadline = System.currentTimeMillis() + timeoutMs
+        var lastState: Boolean? = null
         while (System.currentTimeMillis() < deadline) {
-            val state = readTetheringState(kind)
+            val state = readTetheringStateWithShell(kind) ?: readTetheringState(kind)
             if (state == target) return target
             if (state == null) return null
+            lastState = state
             delay(200L)
         }
-        return readTetheringState(kind)
+        return readTetheringStateWithShell(kind) ?: lastState
+    }
+
+    /** QS tile labels for a tethering kind, most specific first. */
+    private fun tetheringTileLabels(kind: String): String = when (kind) {
+        // The SoftAP tile's content description ("Hotspot" on AOSP).
+        "wifi" -> "hotspot"
+        // "Bluetooth tethering" — specific enough that the plain Bluetooth
+        // tile (which only contains "bluetooth") can never match it.
+        "bluetooth" -> "bluetooth tether"
+        else -> "tethering"
+    }
+
+    /** QS tiles that must NOT match for a kind (label-collision guards). */
+    private fun tetheringTileExclusions(kind: String): List<String> = when (kind) {
+        // "Tethering" is the USB tile on AOSP; keep it away from the BT tile.
+        "bluetooth" -> emptyList()
+        else -> listOf("bluetooth")
+    }
+
+    /**
+     * QS-tile fallback for a tethering kind whose privileged dispatch failed.
+     * Returns true when the state actually flipped. Opens QS, taps the kind's
+     * tile (retrying and scrolling the tile carousel as needed) and closes QS
+     * again via BACK — but only if QS was really opened, so a failed open
+     * never sends a stray BACK to the launcher. The island stays visible the
+     * whole time (suppressShadeHide) and the menu never closes.
+     */
+    private suspend fun toggleTetheringViaQsTile(kind: String, target: Boolean): Boolean {
+        performGlobalAction(
+            android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_QUICK_SETTINGS
+        )
+        val opened = waitForQuickSettings(timeoutMs = 2500L)
+        if (!opened) {
+            android.util.Log.w(TAG, "QS fallback ($kind): quick settings window never appeared")
+            return false
+        }
+        try {
+            val label = tetheringTileLabels(kind)
+            val exclude = tetheringTileExclusions(kind)
+            var carouselSwipes = 0
+            val deadline = System.currentTimeMillis() + 6000L
+            while (System.currentTimeMillis() < deadline) {
+                val tile = findQuickSettingsTile(label, exclude)
+                if (tile == null) {
+                    if (carouselSwipes < 2) {
+                        // The tile may live on the next QS carousel page.
+                        swipeQuickSettingsCarousel()
+                        carouselSwipes++
+                        continue
+                    }
+                    delay(300L)
+                    continue
+                }
+                val bounds = android.graphics.Rect()
+                tile.getBoundsInScreen(bounds)
+                if (bounds.width() <= 0 || bounds.height() <= 0) {
+                    delay(300L)
+                    continue
+                }
+                val tapPath = android.graphics.Path().apply {
+                    moveTo(bounds.exactCenterX(), bounds.exactCenterY())
+                }
+                val tap = android.accessibilityservice.GestureDescription.Builder()
+                    .addStroke(
+                        android.accessibilityservice.GestureDescription.StrokeDescription(
+                            tapPath,
+                            0,
+                            80
+                        )
+                    )
+                    .build()
+                dispatchGesture(tap, null, null)
+                // The platform toggles asynchronously; verify with the best
+                // reader available. When no reader exists on this device the
+                // tap is trusted (optimistic — same contract as the dispatch
+                // path's null-reader behaviour).
+                val verified = waitForTetheringState(kind, target, timeoutMs = 2000L)
+                if (verified == target || verified == null) {
+                    return true
+                }
+                // The tap may have landed on a stale node or missed the tile;
+                // loop and try again until the deadline.
+            }
+            return false
+        } finally {
+            // Close QS again so the user is returned to what was below. The
+            // island menu itself is overlay content and is unaffected by BACK.
+            delay(500L)
+            performGlobalAction(
+                android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK
+            )
+            delay(400L)
+        }
+    }
+
+    /**
+     * Finds a Quick Settings tile across the SystemUI windows by label.
+     * A candidate matches when its content description or text contains
+     * [mustContain] (case-insensitive) and NONE of [excludeContains]; it
+     * must also be visibly tile-sized so background SystemUI nodes never
+     * receive the synthetic tap.
+     */
+    private fun findQuickSettingsTile(
+        mustContain: String,
+        excludeContains: List<String> = emptyList()
+    ): android.view.accessibility.AccessibilityNodeInfo? {
+        val screenWidth = resources.displayMetrics.widthPixels
+        val screenHeight = resources.displayMetrics.heightPixels
+        val candidateRoots = mutableListOf<android.view.accessibility.AccessibilityNodeInfo>()
+        rootInActiveWindow?.let { candidateRoots.add(it) }
+        runCatchingLogged(TAG, "QS window roots failed") {
+            getWindows()
+                ?.filter { it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_SYSTEM }
+                ?.forEach { window ->
+                    val root = window.root ?: return@forEach
+                    if (!candidateRoots.contains(root)) candidateRoots.add(root)
+                }
+        }
+        for (root in candidateRoots) {
+            val matches = root.findAccessibilityNodeInfosByText(mustContain) ?: continue
+            val tile = matches.firstOrNull { node ->
+                val description = node.contentDescription?.toString().orEmpty()
+                val text = node.text?.toString().orEmpty()
+                val haystack = "$description $text".lowercase()
+                haystack.contains(mustContain, ignoreCase = true) &&
+                    excludeContains.none { haystack.contains(it, ignoreCase = true) }
+            } ?: continue
+            val bounds = android.graphics.Rect()
+            tile.getBoundsInScreen(bounds)
+            val tileSized = bounds.width() in 1..(screenWidth / 2) &&
+                bounds.height() in 1..(screenHeight / 3)
+            if (tileSized) return tile
+        }
+        return null
     }
 
     /**
@@ -1554,6 +1782,27 @@ class SmartIslandOverlayService : AccessibilityService() {
     }
 
     /**
+     * Called by the Compose tree the moment the collapsing pill's animated
+     * width first reaches its collapsed target — i.e. the first instant the
+     * content provably fits the narrow collapsed window.
+     *
+     * Narrowing the window HERE (mid-morph, motion-masked) instead of on the
+     * fixed 480ms backstop is what kills the brief leftward flicker of the
+     * right-side companion bubbles right after the collapse settles: the
+     * surface resize transient is invisible while the morph is still moving,
+     * and the settled collapsed state is then never touched by a window
+     * resize at all. Both paths write identical params, so the 480ms backstop
+     * below is a no-op when this already ran (and a safety net when the Compose
+     * callback cannot fire, e.g. the tree is disposed mid-collapse).
+     */
+    private fun onCollapsedContentFit() {
+        if (destroyed || !::viewModel.isInitialized) return
+        if (!isWindowExpanded) return
+        isWindowExpanded = false
+        updateWindowLayoutParams(false, viewModel.settings.value)
+    }
+
+    /**
      * Upper bound for the expanded card height (250dp measured clamp) plus
      * status-bar offset and room for the shadow — used only until the Compose
      * tree reports the real content size.
@@ -1622,14 +1871,17 @@ class SmartIslandOverlayService : AccessibilityService() {
         private const val WINDOWING_MODE_FREEFORM = 5
         private const val OVERLAY_CHANNEL_ID = "smart_island_overlay"
         private const val OVERLAY_CHANNEL_NAME = "Smart Island overlay"
-        // The expanded→collapsed window resize must land AFTER the Compose
-        // collapse springs have settled (stiffness 520, damping 0.72-0.76 →
-        // ~98% settled at ~250ms, plus jank headroom). Resizing while the pill
-        // is still morphing lets the new narrow window CLIP a mid-flight pill
-        // on a stalled frame — a visible pop that reads as the collapsed
-        // island shaking. 480ms is past the spring settle point with margin;
-        // until then the content-sized expanded window just keeps clipping
-        // nothing, and collapseJob is cancelled by a re-expand as before.
+        // BACKSTOP for the expanded→collapsed window resize. The primary
+        // trigger is onCollapsedContentFit(): the Compose tree reports the
+        // moment the animated pill width reaches its collapsed target, and the
+        // window narrows MID-MORPH — the surface-resize transient is invisible
+        // while the morph moves, which is what keeps the settled collapsed
+        // state perfectly still (a resize on a settled screen flashes the
+        // right-side companion bubbles left for a frame or two). This delay
+        // only fires when the Compose callback could not (tree disposed,
+        // unexpected state) — isWindowExpanded makes the second writer a
+        // no-op, and resizing after the springs settle (stiffness 520 → ~98%
+        // at 250ms, plus jank headroom) is safe from mid-flight clipping.
         private const val AUTO_COLLAPSE_DELAY_MS = 480L
         // How long a tethering toggle waits for the system state to confirm
         // before falling back to the (optimistic) dispatch result.

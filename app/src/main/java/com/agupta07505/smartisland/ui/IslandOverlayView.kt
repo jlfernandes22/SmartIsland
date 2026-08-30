@@ -26,6 +26,9 @@ import androidx.compose.ui.input.pointer.changedToUp
 import androidx.compose.ui.input.pointer.positionChange
 import kotlin.math.abs
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.snapshotFlow
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.absoluteOffset
@@ -64,6 +67,7 @@ import com.agupta07505.smartisland.di.SmartIslandRepositories
 import com.agupta07505.smartisland.model.IslandMode
 import com.agupta07505.smartisland.model.IslandNotification
 import com.agupta07505.smartisland.data.LaunchableApp
+import com.agupta07505.smartisland.ui.expanded.idleInfoMenuHeightDp
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.Image
@@ -102,7 +106,8 @@ fun IslandOverlayView(
     onOpenIdleInfoItem: (String) -> Unit = {},
     menuFeedback: String? = null,
     reappearTick: Int = 0,
-    onExpandedWindowContentSize: (Int, Int) -> Unit = { _, _ -> }
+    onExpandedWindowContentSize: (Int, Int) -> Unit = { _, _ -> },
+    onCollapsedContentFit: () -> Unit = {}
 ) {
     // Fix #1: rememberUpdatedState ensures the lambda is always fresh
     // even though pointerInput(Unit) never restarts its coroutine
@@ -154,14 +159,47 @@ fun IslandOverlayView(
     val activeMode = activeNotification?.mode ?: IslandMode.Empty
     val currentSafeIndex by rememberUpdatedState(safeIndex)
 
-    val initialEstimatedHeight = remember(activeMode, notifications.isEmpty()) {
-        if (notifications.isEmpty()) 135.dp else defaultEstimatedHeightForMode(activeMode)
+    // MENU HEIGHT ESTIMATE (post-settle centering fix): the idle info menu's
+    // natural height is fully deterministic (tile count + tile grid), so the
+    // estimate below is the SAME value the first real measurement reports.
+    // With estimate == measurement the card never changes height after the
+    // menu opens — no late overlay-window resize, hence zero post-settle
+    // movement and a perfectly centered icon grid (see idleInfoMenuHeightDp).
+    val initialEstimatedHeight = remember(
+        activeMode,
+        notifications.isEmpty(),
+        settings.idleTapMode,
+        settings.idleInfoShowTime,
+        settings.idleInfoShowBattery,
+        settings.idleInfoShowBluetooth,
+        settings.idleInfoShowHotspot,
+        settings.idleInfoShowUsbTethering,
+        settings.idleInfoShowBtTethering
+    ) {
+        if (notifications.isEmpty()) {
+            if (settings.idleTapMode == SmartIslandSettings.IdleTapModes.INFO) {
+                // Card width minus the menu column's 12dp start+end padding.
+                idleInfoMenuHeightDp(settings, expandedWidth.value - 24f)
+            } else {
+                135.dp
+            }
+        } else {
+            defaultEstimatedHeightForMode(activeMode)
+        }
     }
     var expandedHeight by remember { mutableStateOf(initialEstimatedHeight) }
 
     LaunchedEffect(activeMode, notifications.isEmpty()) {
         if (!expanded) {
-            expandedHeight = if (notifications.isEmpty()) 135.dp else defaultEstimatedHeightForMode(activeMode)
+            expandedHeight = if (notifications.isEmpty()) {
+                if (settings.idleTapMode == SmartIslandSettings.IdleTapModes.INFO) {
+                    idleInfoMenuHeightDp(settings, expandedWidth.value - 24f)
+                } else {
+                    135.dp
+                }
+            } else {
+                defaultEstimatedHeightForMode(activeMode)
+            }
         }
     }
 
@@ -333,6 +371,28 @@ fun IslandOverlayView(
                 with(density) { quantizedHeightDp.roundToPx() }
             )
         }
+    }
+
+    // COLLAPSED-WINDOW RESIZE TIMING (post-settle flicker fix):
+    // The service must narrow the overlay window to the collapsed group extent
+    // (touch passthrough on devices without the touchableRegion API), and the
+    // surface resize is only invisible while the collapse morph is still
+    // moving. Resizing on a SETTLED screen (the previous fixed 480ms delay)
+    // flashes the right-side companion bubbles toward the window center for a
+    // frame or two — a brief jump to the LEFT right after the collapse lands.
+    // The window may be narrowed as soon as the animated pill width has
+    // dropped to its collapsed target: from that moment the content fits the
+    // narrow window, so nothing can clip, and the resize lands mid-morph where
+    // motion masks it (the original upstream resizes at a fixed 220ms for the
+    // same reason). The service also keeps its delayed resize as a backstop;
+    // both paths converge on the same WindowManager params, so whichever runs
+    // second is a no-op.
+    LaunchedEffect(expanded) {
+        if (expanded) return@LaunchedEffect
+        snapshotFlow { width <= effectiveWidth.dp }
+            .filter { it }
+            .first()
+        onCollapsedContentFit()
     }
 
     // Dual Pill (Multi-Tasking Split Island) Detection:

@@ -35,12 +35,29 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    // Toggle-rows permission flow: the overlay launches MainActivity with
+    // EXTRA_REQUEST_TOGGLE_PERMISSIONS when a hotspot / tethering row needs a
+    // runtime grant (the same launch-an-extra pattern as the Bluetooth
+    // request below). Only permissions the user has never rejected are
+    // asked for — a previous rejection keeps the system dialog silent and
+    // would only flash an empty screen.
+    private val togglePermissionsLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { grants ->
+        if (grants.values.any { it }) {
+            Toast.makeText(this, "Permission granted", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         SystemServiceRecovery.requestRecovery(this)
 
         if (intent?.getBooleanExtra(EXTRA_REQUEST_BLUETOOTH_PERMISSION, false) == true) {
             requestBluetoothPermissionIfNeeded()
+        }
+        if (intent?.getBooleanExtra(EXTRA_REQUEST_TOGGLE_PERMISSIONS, false) == true) {
+            requestTogglePermissionsIfNeeded()
         }
 
         setContent {
@@ -59,6 +76,9 @@ class MainActivity : ComponentActivity() {
         if (intent.getBooleanExtra(EXTRA_REQUEST_BLUETOOTH_PERMISSION, false)) {
             requestBluetoothPermissionIfNeeded()
         }
+        if (intent.getBooleanExtra(EXTRA_REQUEST_TOGGLE_PERMISSIONS, false)) {
+            requestTogglePermissionsIfNeeded()
+        }
     }
 
     private fun requestBluetoothPermissionIfNeeded() {
@@ -69,6 +89,32 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Runtime grants the hotspot / tethering toggle rows rely on for their
+     * state reads (the toggles themselves are dispatched with shell-level
+     * privileges through the Shizuku user service and need no app permission).
+     * Only ever asks for permissions that are missing AND never rejected
+     * (shouldShowRequestPermissionRationale is false for never-asked and
+     * permanently-denied, but a permanently-denied request would be a silent
+     * no-op — matching the "user has never rejected it" rule).
+     */
+    private fun requestTogglePermissionsIfNeeded() {
+        val wanted = mutableListOf<String>()
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+            wanted.add(android.Manifest.permission.BLUETOOTH_CONNECT)
+        }
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            wanted.add(android.Manifest.permission.NEARBY_WIFI_DEVICES)
+        }
+        val askNow = wanted.filter { perm ->
+            checkSelfPermission(perm) != PackageManager.PERMISSION_GRANTED &&
+                !shouldShowRequestPermissionRationale(perm)
+        }
+        if (askNow.isNotEmpty()) {
+            togglePermissionsLauncher.launch(askNow.toTypedArray())
+        }
+    }
+
     override fun onResume() {
         super.onResume()
         SystemServiceRecovery.requestRecovery(this)
@@ -76,5 +122,8 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         const val EXTRA_REQUEST_BLUETOOTH_PERMISSION = "request_bluetooth_permission"
+
+        /** Overlay → MainActivity: ask for the missing toggle-row permissions. */
+        const val EXTRA_REQUEST_TOGGLE_PERMISSIONS = "request_toggle_permissions"
     }
 }
