@@ -25,7 +25,6 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.ui.input.pointer.changedToUp
 import androidx.compose.ui.input.pointer.positionChange
 import kotlin.math.abs
-import kotlin.math.roundToInt
 import androidx.compose.runtime.rememberCoroutineScope
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.layout.Box
@@ -100,15 +99,6 @@ fun IslandOverlayView(
     onReplyStateChanged: (Boolean) -> Unit = {},
     onDismissAllNotifications: () -> Unit = {},
     isFullWidth: Boolean = true,
-    // dp offset of the ACTUAL overlay window center from the screen center,
-    // published by SmartIslandOverlayService (0f for any full-width window,
-    // windowXPx/density for the narrow collapsed window). Subtracted from every
-    // rendered x-translation below so the content stays anchored to the SCREEN
-    // instead of the window: the collapsed window only shrinks ~220ms after the
-    // collapse starts, and without the compensation every element rendered
-    // (baseCenter - screenCenter) too far left until the window resized, then
-    // teleported back into place.
-    windowCenterOffsetDp: Float = 0f,
     onOpenIdleInfoItem: (String) -> Unit = {},
     menuFeedback: String? = null,
     reappearTick: Int = 0,
@@ -137,7 +127,6 @@ fun IslandOverlayView(
     val context = LocalContext.current
     val displayMetrics = context.resources.displayMetrics
     val density = LocalDensity.current
-    val windowCenterOffsetPx = windowCenterOffsetDp * density.density
     val screenWidth = with(density) { displayMetrics.widthPixels.toDp() }
     val screenCenter = screenWidth / 2f
     val expandedWidth = ((displayMetrics.widthPixels / displayMetrics.density) * EXPANDED_WIDTH_RATIO).dp
@@ -198,17 +187,15 @@ fun IslandOverlayView(
             (screenWidth - companionGroupWidth - compactGap).coerceAtLeast(compactGap)
         )
     // Collapsed offsets are SCREEN-anchored: target = desiredScreenX -
-    // screenCenter. They are independent of the current window geometry; the
-    // window-relative rendering is recovered at each render site via
-    // "target - windowCenterOffsetDp" (see the parameter docs above):
-    // renderedX = windowCenter + (target - windowCenterOffsetDp) always equals
-    // screenCenter + target, whether the window is full-width (centered on the
-    // screen) or the narrow collapsed window centered on the pill group
-    // (collapsedMainLeft + (mainWidth + companionGroupWidth) / 2). Because the
-    // rendered path no longer depends on which window is active, the service's
-    // delayed narrow-window resize no longer shifts or teleports the content
-    // mid-animation. For full-width devices windowCenterOffsetDp is always 0
-    // and these formulas are identical to the old (window-relative) ones.
+    // screenCenter. The service keeps the overlay window horizontally centered
+    // (x = 0) in every state — expanded and the narrow collapsed window alike —
+    // so the window center IS the screen center and every render site can apply
+    // its target directly: renderedX = windowCenter + target = screenCenter +
+    // target. Because the rendered path does not depend on which window is
+    // active, the service's delayed narrow-window resize only changes the clip
+    // bounds around the content and can never shift or teleport it (and no
+    // per-frame window/compensation animation is needed, which is what made
+    // the collapsed island shake before).
     val collapsedMainOffset = settings.xOffset.dp
     val expandedTopOffset = if (hasCompanion) {
         statusBarHeight.dp.coerceAtLeast(circleSize + compactGap)
@@ -457,10 +444,7 @@ fun IslandOverlayView(
                     .width(effectiveWidth.dp)
                     .height(effectiveHeight.dp)
                     .graphicsLayer {
-                        // Screen-anchored: cancel the window-center offset so
-                        // this target tracks the pill wherever the window sits.
-                        translationX = collapsedMainOffset.toPx() -
-                            windowCenterOffsetPx
+                        translationX = collapsedMainOffset.toPx()
                     }
                     .pointerInput(Unit) {
                         detectTapGestures {
@@ -483,11 +467,9 @@ fun IslandOverlayView(
                 .width(safeWidth)
                 .height(safeHeight)
                 .graphicsLayer {
-                    // renderedX = windowCenter + (target - windowCenterOffset)
-                    // = screenCenter + target for every window geometry, so the
-                    // delayed collapse-window resize cannot move the pill.
-                    translationX = animatedXOffset.toPx() -
-                        windowCenterOffsetPx
+                    // Screen-anchored target; the window is always centered so
+                    // renderedX = screenCenter + xOffset in every window state.
+                    translationX = animatedXOffset.toPx()
                     translationY = yOffset.toPx() + dragOffset
                     scaleX = switchScaleAnim.value
                     scaleY = switchScaleAnim.value
@@ -676,8 +658,7 @@ fun IslandOverlayView(
                 modifier = Modifier
                     .absoluteOffset {
                         IntOffset(
-                            secondaryOffset.roundToPx() -
-                                (windowCenterOffsetPx).roundToInt(),
+                            secondaryOffset.roundToPx(),
                             0
                         )
                     }
@@ -747,8 +728,7 @@ fun IslandOverlayView(
                 modifier = Modifier
                     .absoluteOffset {
                         IntOffset(
-                            tertiaryOffset.roundToPx() -
-                                (windowCenterOffsetPx).roundToInt(),
+                            tertiaryOffset.roundToPx(),
                             0
                         )
                     }

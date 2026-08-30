@@ -29,9 +29,6 @@ import android.widget.Toast
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.ViewCompositionStrategy
 import android.accessibilityservice.AccessibilityService
-import android.animation.Animator
-import android.animation.AnimatorListenerAdapter
-import android.animation.ValueAnimator
 import android.view.accessibility.AccessibilityEvent
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.setViewTreeLifecycleOwner
@@ -59,8 +56,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -89,38 +84,17 @@ class SmartIslandOverlayService : AccessibilityService() {
     @Volatile private var suppressShadeHide: Boolean = false
     private var collapseJob: kotlinx.coroutines.Job? = null
     private var lastParams: WindowManager.LayoutParams? = null
-    // Expanded→collapsed window transition glide (see
-    // startCollapseWindowGlide): animates the narrow window's x offset and
-    // width while the Compose tree tracks the x per frame via
-    // windowCenterOffsetFlow, so the window resize can never jump the visible
-    // island sideways.
-    private var collapseWindowAnimator: ValueAnimator? = null
-    // The params a running glide is heading to (null when idle). Needed because
-    // lastParams is mutated in place mid-glide, so comparing it against the
-    // target can't tell whether a glide is already en route.
-    private var collapseWindowGlideTarget: WindowGlideTarget? = null
-
-    private data class WindowGlideTarget(
-        val x: Int,
-        val w: Int,
-        val h: Int,
-        val flags: Int,
-        val softInputMode: Int
-    )
-    // dp offset of the ACTUAL overlay window center from the screen center,
-    // published for the Compose tree (OverlayIsland -> IslandOverlayView.
-    // windowCenterOffsetDp). 0f whenever the window is full-width (expanded, or
-    // the touchableRegion API works); windowXPx/density for the narrow collapsed
-    // window, which is centered on the pill group (screenCenter + windowXPx).
-    // The Compose tree subtracts this from every rendered x-translation so the
-    // content is anchored to the SCREEN: since the collapsed window only
-    // shrinks ~220ms after the collapse starts, without the compensation every
-    // element rendered (groupCenter - screenCenter) too far left during the
-    // animation and then teleported back when the window resized. Updated in
-    // updateWindowLayoutParams AND collapsedParams, right before the window
-    // relayout, so the recomposition and the window resize land on the same
-    // frame.
-    private val windowCenterOffsetFlow: MutableStateFlow<Float> = MutableStateFlow(0f)
+    // WINDOW CENTERING INVARIANT: every window this service attaches is
+    // horizontally centered (x = 0) in every state — expanded, collapsed, and
+    // narrow-fallback alike. The collapsed content is screen-anchored (all
+    // targets include "- screenCenter" in IslandOverlayView), so
+    // renderedX = windowCenter + target = screenCenter + target holds purely by
+    // geometry. The delayed expanded→collapsed resize only narrows the clip
+    // bounds AROUND the content and can therefore never displace it sideways,
+    // with no per-frame window animation and no window-center compensation
+    // flow (both removed — their per-frame updateViewLayout churn plus the
+    // unavoidable one-frame lag between the relayout and the Compose
+    // recomposition made the collapsed island visibly shake).
     // Content-sized expanded window (touch-passthrough fallback): reported by the
     // Compose tree when the hidden touchableRegion API is unavailable, so the
     // expanded window can be sized to the card instead of swallowing the screen.
@@ -502,10 +476,6 @@ class SmartIslandOverlayService : AccessibilityService() {
         destroyed = true
         isSystemConnected = false
         serviceScope.cancel()
-        // The glide runs on the main-thread choreographer, not serviceScope.
-        collapseWindowAnimator?.cancel()
-        collapseWindowAnimator = null
-        collapseWindowGlideTarget = null
 
         if (::systemEventReceiver.isInitialized && systemEventReceiverRegistered) {
             runCatchingLogged(TAG, "unregisterReceiver failed") {
@@ -599,7 +569,6 @@ class SmartIslandOverlayService : AccessibilityService() {
                     OverlayIsland(
                         viewModel = this@SmartIslandOverlayService.viewModel,
                         statusBarHeight = statusBarHeight,
-                        windowCenterOffsetFlow = windowCenterOffsetFlow,
                         onOpenNotification = { notification -> openNotification(notification) },
                         onLaunchApp = { packageName -> launchApp(packageName) },
                         onOpenFloatingWindow = { openCurrentNotificationInFloatingWindow() },
@@ -770,11 +739,6 @@ class SmartIslandOverlayService : AccessibilityService() {
     private fun updateWindowLayoutParams(expanded: Boolean, settings: SmartIslandSettings) {
         if (destroyed || !::windowManager.isInitialized || !::viewModel.isInitialized) return
         val view = islandView ?: return
-        // Expanding (or switching to a full-width window) abandons any running
-        // collapse glide; the expanded branch below applies its params directly.
-        if (expanded || isTouchableRegionSupported) {
-            collapseWindowAnimator?.cancel()
-        }
         val density = resources.displayMetrics.density
         val screenWidthPx = resources.displayMetrics.widthPixels.toFloat()
         
@@ -803,38 +767,11 @@ class SmartIslandOverlayService : AccessibilityService() {
         }
 
         val notificationCount = viewModel.notifications.value.size
-        val isSplitMode = notificationCount >= 2
-        val mainWidthPx = settings.width * density
-        val circleSizePx = settings.height * density
-        val compactGapPx = 8f * density
-        val edgePaddingPx = 8f * density
-        // Collapsed group = main pill + one gap+circle per companion bubble.
-        // 3+ notifications also draw a tertiary circle, so the narrow window
-        // must cover a second gap+circle or it clips that bubble (mirrors
+        // Collapsed group extent = main pill + one gap+circle per companion
+        // bubble. 3+ notifications also draw a tertiary circle, so the narrow
+        // window must cover a second gap+circle or it clips that bubble (mirrors
         // companionGroupWidth in IslandOverlayView).
-        val groupWidthPx = mainWidthPx + when {
-            notificationCount >= 3 -> 2 * (compactGapPx + circleSizePx)
-            isSplitMode -> compactGapPx + circleSizePx
-            else -> 0f
-        }
-
-        val desiredMainLeftPx = screenWidthPx / 2f + settings.xOffset * density - mainWidthPx / 2f
-        val maxMainLeftPx = (screenWidthPx - groupWidthPx - edgePaddingPx).coerceAtLeast(edgePaddingPx)
-        val mainLeftPx = desiredMainLeftPx.coerceIn(edgePaddingPx, maxMainLeftPx)
-        val groupCenterPx = mainLeftPx + groupWidthPx / 2f
-        val windowXPx = (groupCenterPx - screenWidthPx / 2f).toInt()
-        // Publish the window-center compensation BEFORE the dedup short-circuit
-        // and before updateViewLayout: 0f for any full-width window (expanded,
-        // or touchableRegion supported), otherwise the narrow window's x offset
-        // (its center is screenCenter + windowXPx). StateFlow dedups equal
-        // values, so re-publishing the same value here is a no-op.
-        // While a collapse glide is running it owns this flow with per-frame
-        // values — publishing the final target here would jump the Compose
-        // compensation to the end position while the window is still halfway.
-        if (collapseWindowAnimator?.isRunning != true) {
-            windowCenterOffsetFlow.value =
-                if (expanded || isTouchableRegionSupported) 0f else windowXPx / density
-        }
+        val collapsedWidthPx = collapsedWindowWidthPx(settings, notificationCount, density)
 
         val h = if (expanded) {
             if (!isTouchableRegionSupported) {
@@ -853,7 +790,7 @@ class SmartIslandOverlayService : AccessibilityService() {
                 expandedWindowWidthPx.takeIf { it > 0 }
                     ?: (screenWidthPx * EXPANDED_WINDOW_WIDTH_RATIO).toInt()
             expanded || isTouchableRegionSupported -> WindowManager.LayoutParams.MATCH_PARENT
-            else -> (groupWidthPx + 32f * density).toInt()
+            else -> collapsedWidthPx
         }
         val isInput = viewModel.isInputActive.value && expanded
         val focusFlags = if (isInput) 0 else WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
@@ -869,10 +806,11 @@ class SmartIslandOverlayService : AccessibilityService() {
                 WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
             } else 0)
 
-        // Expanded content is centered on the screen inside its window, so the
-        // window itself must be centered too; only the narrow collapsed window
-        // tracks the user's pill x-offset.
-        val currentX = if (expanded || isTouchableRegionSupported) 0 else windowXPx
+        // WINDOW CENTERING INVARIANT: x is 0 in every state. The expanded and
+        // collapsed windows share the screen center, so the delayed
+        // expanded→collapsed resize cannot displace the screen-anchored
+        // content — only its clip bounds change (see the class-level comment).
+        val currentX = 0
         val currentY = settings.yOffset.dpToPx()
         val currentSoftInputMode = if (isInput) {
             WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE or
@@ -893,51 +831,6 @@ class SmartIslandOverlayService : AccessibilityService() {
             return
         }
 
-        // A collapse glide is already heading to these exact params: let it
-        // finish instead of snapping to the target from its mid-flight frame.
-        val runningGlideTarget = WindowGlideTarget(
-            currentX, w, h, currentFlags, currentSoftInputMode
-        )
-        if (collapseWindowAnimator?.isRunning == true &&
-            collapseWindowGlideTarget == runningGlideTarget
-        ) {
-            return
-        }
-
-        // Expanded→collapsed transition on a narrow-window device: glide the
-        // window to the pill group instead of stepping it. An instant x step
-        // here is the "end-of-collapse left snap": the Compose compensation
-        // frame becomes visible before the resized window frame does, so the
-        // whole island flashes (oldWindowCenter − newWindowCenter) sideways
-        // and then corrects when the resize lands.
-        if (!expanded &&
-            !isTouchableRegionSupported &&
-            currentX != 0 &&
-            lp != null &&
-            lp.x == 0 &&
-            lp.width != w
-        ) {
-            startCollapseWindowGlide(
-                view = view,
-                targetX = currentX,
-                targetW = w,
-                targetH = h,
-                flags = currentFlags,
-                softInputMode = currentSoftInputMode,
-                density = density
-            )
-            return
-        }
-
-        // Not a glide transition (or the glide target changed mid-flight):
-        // abandon any running glide — an animator still mutating lp.x must not
-        // fight the instant apply below. The flow publish at the top was
-        // skipped for the running glide, so re-publish the target here before
-        // the relayout lands.
-        collapseWindowAnimator?.cancel()
-        windowCenterOffsetFlow.value =
-            if (expanded || isTouchableRegionSupported) 0f else windowXPx / density
-
         val params = WindowManager.LayoutParams(
             w,
             h,
@@ -957,93 +850,43 @@ class SmartIslandOverlayService : AccessibilityService() {
     }
 
     /**
-     * Glides the overlay window from its centered (expanded) geometry to the
-     * narrow collapsed one over ~[COLLAPSE_WINDOW_GLIDE_MS] instead of stepping
-     * it, while the Compose tree tracks the moving window center per frame via
-     * [windowCenterOffsetFlow]. The content is screen-anchored
-     * (renderedX = windowCenter + (target − windowCenterOffset)), so when both
-     * sides advance together the island never moves on screen — and because the
-     * window center changes only by one glide step per frame, even a one-frame
-     * skew between the relayout and the Compose recomposition costs a few
-     * pixels, never the full (oldWindowCenter − newWindowCenter) jump.
+     * Width of the narrow collapsed window on devices without the
+     * touchableRegion API. The window is horizontally CENTERED (x = 0, same
+     * center as the expanded window) and sized to contain the screen-anchored
+     * collapsed content: the main pill at screenCenter + xOffset, companion
+     * bubbles extending to the right, plus the usual 16dp side padding.
      *
-     * x AND width glide together: the window's right edge then only ever moves
-     * outward across the glide (the x gain exceeds the width loss), so the
-     * companion bubbles that are still sliding into their slots at glide start
-     * can never be clipped by the shrinking window. Height/flags adopt their
-     * final values up front — those steps only clip the already-faded expanded
-     * card (the glide starts ~220ms into the collapse; the card fade takes
-     * 190ms) and never displace visible content.
+     * For a single notification (or idle) this is exactly the old
+     * (groupWidth + 32dp) size. In split/tertiary mode it is wider than the
+     * old group-centered window: a centered window must span the content's
+     * right extent symmetrically, so the empty left half grows as well. That
+     * extra transparent band is the deliberate price of the fixed window
+     * center — it buys a collapsed state whose window never moves at all,
+     * which is what makes the transition and the steady state jitter-free.
+     *
+     * Centering is what makes the collapsed state stable: the delayed
+     * expanded→collapsed resize keeps the window center fixed, so
+     * renderedX = screenCenter + target for every element before, during and
+     * after the resize — no compensation, no animation, no jumps.
      */
-    private fun startCollapseWindowGlide(
-        view: android.view.View,
-        targetX: Int,
-        targetW: Int,
-        targetH: Int,
-        flags: Int,
-        softInputMode: Int,
+    private fun collapsedWindowWidthPx(
+        settings: SmartIslandSettings,
+        notificationCount: Int,
         density: Float
-    ) {
-        val glideLp = lastParams ?: return
-        collapseWindowAnimator?.cancel()
-        val startX = glideLp.x
-        val startW = glideLp.width
-        // Vertical/flag steps are displacement-free; adopt them now.
-        glideLp.height = targetH
-        glideLp.flags = flags
-        glideLp.softInputMode = softInputMode
-        collapseWindowGlideTarget = WindowGlideTarget(
-            targetX, targetW, targetH, flags, softInputMode
-        )
-        if (startX == targetX && startW == targetW) {
-            windowCenterOffsetFlow.value = targetX / density
-            runCatchingLogged(TAG, "Collapse glide final frame failed") {
-                windowManager.updateViewLayout(view, glideLp)
-            }
-            collapseWindowGlideTarget = null
-            return
+    ): Int {
+        val mainWidthPx = settings.width * density
+        val circleSizePx = settings.height * density
+        val compactGapPx = 8f * density
+        val companionExtraPx = when {
+            notificationCount >= 3 -> 2 * (compactGapPx + circleSizePx)
+            notificationCount >= 2 -> compactGapPx + circleSizePx
+            else -> 0f
         }
-        // Flow first, relayout second — same ordering as the instant path.
-        windowCenterOffsetFlow.value = startX / density
-        runCatchingLogged(TAG, "Collapse glide first frame failed") {
-            windowManager.updateViewLayout(view, glideLp)
-        }
-        collapseWindowAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
-            duration = COLLAPSE_WINDOW_GLIDE_MS
-            interpolator = android.view.animation.LinearInterpolator()
-            addUpdateListener { anim ->
-                val f = anim.animatedValue as Float
-                val x = (startX + (targetX - startX) * f).toInt()
-                val w = (startW + (targetW - startW) * f).toInt()
-                if (x == glideLp.x && w == glideLp.width) return@addUpdateListener
-                glideLp.x = x
-                glideLp.width = w
-                windowCenterOffsetFlow.value = x / density
-                runCatchingLogged(TAG, "Collapse glide frame failed") {
-                    windowManager.updateViewLayout(view, glideLp)
-                }
-            }
-            addListener(object : AnimatorListenerAdapter() {
-                private var cancelled = false
-                override fun onAnimationCancel(animation: Animator) {
-                    cancelled = true
-                }
-
-                override fun onAnimationEnd(animation: Animator) {
-                    collapseWindowAnimator = null
-                    collapseWindowGlideTarget = null
-                    if (!cancelled) {
-                        glideLp.x = targetX
-                        glideLp.width = targetW
-                        windowCenterOffsetFlow.value = targetX / density
-                        runCatchingLogged(TAG, "Collapse glide end failed") {
-                            windowManager.updateViewLayout(view, glideLp)
-                        }
-                    }
-                }
-            })
-            start()
-        }
+        val xOffsetPx = settings.xOffset * density
+        val sidePaddingPx = 16f * density
+        val leftExtentPx = mainWidthPx / 2f - xOffsetPx
+        val rightExtentPx = mainWidthPx / 2f + companionExtraPx + xOffsetPx
+        return (2f * (maxOf(leftExtentPx, rightExtentPx) + sidePaddingPx)).toInt()
     }
 
     private fun removeCollapsedWindow() {
@@ -1055,9 +898,6 @@ class SmartIslandOverlayService : AccessibilityService() {
         isWindowExpanded = false
         collapseJob?.cancel()
         collapseJob = null
-        collapseWindowAnimator?.cancel()
-        collapseWindowAnimator = null
-        collapseWindowGlideTarget = null
         if (!::windowManager.isInitialized) return
         runCatchingLogged(TAG, "Failed to remove view") {
             if (view.isAttachedToWindow) {
@@ -1068,39 +908,14 @@ class SmartIslandOverlayService : AccessibilityService() {
 
     private fun collapsedParams(settings: SmartIslandSettings): WindowManager.LayoutParams {
         val density = resources.displayMetrics.density
-        val screenWidthPx = resources.displayMetrics.widthPixels.toFloat()
         val notificationCount = if (::viewModel.isInitialized) viewModel.notifications.value.size else 0
-        val isSplitMode = notificationCount >= 2
-        val mainWidthPx = settings.width * density
-        val circleSizePx = settings.height * density
-        val compactGapPx = 8f * density
-        val edgePaddingPx = 8f * density
-        // Collapsed group = main pill + one gap+circle per companion bubble.
-        // 3+ notifications also draw a tertiary circle, so the narrow window
-        // must cover a second gap+circle or it clips that bubble (mirrors
-        // companionGroupWidth in IslandOverlayView).
-        val groupWidthPx = mainWidthPx + when {
-            notificationCount >= 3 -> 2 * (compactGapPx + circleSizePx)
-            isSplitMode -> compactGapPx + circleSizePx
-            else -> 0f
-        }
-
-        val desiredMainLeftPx = screenWidthPx / 2f + settings.xOffset * density - mainWidthPx / 2f
-        val maxMainLeftPx = (screenWidthPx - groupWidthPx - edgePaddingPx).coerceAtLeast(edgePaddingPx)
-        val mainLeftPx = desiredMainLeftPx.coerceIn(edgePaddingPx, maxMainLeftPx)
-        val groupCenterPx = mainLeftPx + groupWidthPx / 2f
-        val windowXPx = (groupCenterPx - screenWidthPx / 2f).toInt()
-        // Initial collapsed window: publish the narrow-window compensation
-        // (0f if the touchableRegion API works, since the window is then
-        // MATCH_PARENT). When reflection succeeds, setupTouchableRegion calls
-        // updateWindowLayoutParams, which re-publishes the correct value.
-        windowCenterOffsetFlow.value =
-            if (isTouchableRegionSupported) 0f else windowXPx / density
-
+        // Initial collapsed window: horizontally centered (x = 0) like every
+        // other window state, sized to contain the screen-anchored collapsed
+        // content (see collapsedWindowWidthPx).
         val w = if (isTouchableRegionSupported) {
             WindowManager.LayoutParams.MATCH_PARENT
         } else {
-            (groupWidthPx + 32f * density).toInt()
+            collapsedWindowWidthPx(settings, notificationCount, density)
         }
         val currentFlags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
             WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
@@ -1116,7 +931,8 @@ class SmartIslandOverlayService : AccessibilityService() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-            x = if (isTouchableRegionSupported) 0 else windowXPx
+            // WINDOW CENTERING INVARIANT: x = 0 in every window state.
+            x = 0
             y = settings.yOffset.dpToPx()
         }.also {
             lastParams = it
@@ -1371,27 +1187,15 @@ class SmartIslandOverlayService : AccessibilityService() {
     }
 
     /**
-     * Best-effort tethering state reader. Returns true/false when readable,
-     * null when this device offers no reliable read (e.g. Bluetooth tethering,
-     * whose PAN state is a hidden, permission-guarded API).
+     * Best-effort tethering state reader, shared with the idle info menu
+     * (HotspotUtil). Returns true/false when readable, null when this device
+     * offers no reliable read (the caller then trusts the dispatch result).
      */
     private fun readTetheringState(kind: String): Boolean? = when (kind) {
-        "wifi" -> HotspotUtil.isHotspotActive(this)
-        "usb" -> isUsbTetheringActive()
-        else -> null
+        "wifi" -> HotspotUtil.isWifiTetheringActive(this)
+        "usb" -> HotspotUtil.isUsbTetheringActive(this)
+        else -> HotspotUtil.isBluetoothTetheringActive(this)
     }
-
-    /**
-     * Permission-free USB tethering probe: enabling USB tethering brings up the
-     * rndis0/usb0 network interface. Returns false when neither interface is
-     * up; the caller pairs this with an optimistic dispatch result.
-     */
-    private fun isUsbTetheringActive(): Boolean = runCatching {
-        val interfaces = java.net.NetworkInterface.getNetworkInterfaces() ?: return false
-        interfaces.toList().any {
-            (it.name == "rndis0" || it.name == "usb0") && it.isUp
-        }
-    }.getOrDefault(false)
 
     /**
      * Polls [readTetheringState] until the tethering state reaches [target] or
@@ -1815,10 +1619,6 @@ class SmartIslandOverlayService : AccessibilityService() {
         // How long a tethering toggle waits for the system state to confirm
         // before falling back to the (optimistic) dispatch result.
         private const val TETHERING_TOGGLE_VERIFY_TIMEOUT_MS = 4000L
-        // Duration of the expanded→collapsed window x glide (see
-        // startCollapseWindowGlide). Short enough to end with the collapse
-        // spring, long enough that the per-frame window steps are invisible.
-        private const val COLLAPSE_WINDOW_GLIDE_MS = 200L
         private const val EXPANDED_WINDOW_WIDTH_RATIO = 0.95f
     }
 

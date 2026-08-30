@@ -9,18 +9,16 @@ package com.agupta07505.smartisland.ui.expanded
 
 import android.bluetooth.BluetoothAdapter
 import android.content.Context
-import android.content.Intent
 import android.content.IntentFilter
 import android.os.BatteryManager
 import android.os.Build
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -66,6 +64,16 @@ private data class IdleDeviceState(
     val btTetheringText: String
 )
 
+// Minimal palette: one muted resting tone, functional accents only when a
+// radio/tether is actually on. Everything else is white-on-black with lots of
+// negative space — the menu reads as a quiet list, not a dashboard.
+private val Muted = Color(0xFF94A3B8)
+private val MutedText = Color(0xFF9AA4AF)
+private val AccentTime = Color(0xFF38BDF8)
+private val AccentOn = Color(0xFF10B981)
+private val AccentBluetooth = Color(0xFF2563EB)
+private val AccentHotspot = Color(0xFFF59E0B)
+
 @Composable
 fun IdleInfoExpanded(
     settings: SmartIslandSettings,
@@ -88,30 +96,32 @@ fun IdleInfoExpanded(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(start = 16.dp, top = 12.dp, end = 16.dp, bottom = 14.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
+            .padding(start = 18.dp, top = 10.dp, end = 18.dp, bottom = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp)
     ) {
         if (settings.idleInfoShowTime) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .heightIn(min = 46.dp)
+                    .clip(RoundedCornerShape(12.dp))
                     .clickable { onItemClick(IDLE_ITEM_TIME) },
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                InfoIconBadge(icon = Icons.Rounded.Schedule, color = Color(0xFF38BDF8))
+                InfoIcon(icon = Icons.Rounded.Schedule, color = AccentTime)
                 Column {
                     Text(
                         text = state.timeText,
                         color = Color.White,
-                        fontSize = 26.sp,
-                        lineHeight = 28.sp,
-                        fontWeight = FontWeight.ExtraBold
+                        fontSize = 22.sp,
+                        lineHeight = 24.sp,
+                        fontWeight = FontWeight.SemiBold
                     )
                     Text(
                         text = state.dateText,
-                        color = Color(0xFFB7C0CA),
-                        fontSize = 12.sp
+                        color = Muted,
+                        fontSize = 11.sp
                     )
                 }
             }
@@ -120,7 +130,7 @@ fun IdleInfoExpanded(
         if (settings.idleInfoShowBattery) {
             IdleInfoRow(
                 icon = Icons.Rounded.BatteryChargingFull,
-                iconColor = if (state.batteryCharging) Color(0xFF10B981) else Color(0xFF94A3B8),
+                iconColor = if (state.batteryCharging) AccentOn else Muted,
                 label = "Battery",
                 value = state.batteryText,
                 onClick = { onItemClick(IDLE_ITEM_BATTERY) }
@@ -130,7 +140,7 @@ fun IdleInfoExpanded(
         if (settings.idleInfoShowBluetooth) {
             IdleInfoRow(
                 icon = if (state.bluetoothOn) Icons.Rounded.BluetoothConnected else Icons.Rounded.Bluetooth,
-                iconColor = if (state.bluetoothOn) Color(0xFF2563EB) else Color(0xFF94A3B8),
+                iconColor = if (state.bluetoothOn) AccentBluetooth else Muted,
                 label = "Bluetooth",
                 value = state.bluetoothText,
                 onClick = { onItemClick(IDLE_ITEM_BLUETOOTH) }
@@ -140,7 +150,7 @@ fun IdleInfoExpanded(
         if (settings.idleInfoShowHotspot) {
             IdleInfoRow(
                 icon = Icons.Rounded.WifiTethering,
-                iconColor = if (state.hotspotText.startsWith("On")) Color(0xFFF59E0B) else Color(0xFF94A3B8),
+                iconColor = if (state.hotspotText == "On") AccentHotspot else Muted,
                 label = "Hotspot",
                 value = state.hotspotText,
                 onClick = { onItemClick(IDLE_ITEM_HOTSPOT) }
@@ -150,7 +160,7 @@ fun IdleInfoExpanded(
         if (settings.idleInfoShowUsbTethering) {
             IdleInfoRow(
                 icon = Icons.Rounded.Usb,
-                iconColor = if (state.usbTetheringText.startsWith("On")) Color(0xFF10B981) else Color(0xFF94A3B8),
+                iconColor = if (state.usbTetheringText == "On") AccentOn else Muted,
                 label = "USB Tethering",
                 value = state.usbTetheringText,
                 onClick = { onItemClick(IDLE_ITEM_USB_TETHERING) }
@@ -160,7 +170,7 @@ fun IdleInfoExpanded(
         if (settings.idleInfoShowBtTethering) {
             IdleInfoRow(
                 icon = if (state.bluetoothOn) Icons.Rounded.BluetoothConnected else Icons.Rounded.Bluetooth,
-                iconColor = if (state.btTetheringText.startsWith("On")) Color(0xFF2563EB) else Color(0xFF94A3B8),
+                iconColor = if (state.btTetheringText == "On") AccentBluetooth else Muted,
                 label = "Bluetooth Tethering",
                 value = state.btTetheringText,
                 onClick = { onItemClick(IDLE_ITEM_BT_TETHERING) }
@@ -176,8 +186,8 @@ fun IdleInfoExpanded(
         ) {
             Text(
                 text = "All info items are disabled",
-                color = Color(0xFFB7C0CA),
-                fontSize = 13.sp
+                color = Muted,
+                fontSize = 11.sp
             )
         }
 
@@ -187,10 +197,12 @@ fun IdleInfoExpanded(
         if (feedback != null) {
             Text(
                 text = feedback,
-                color = Color(0xFF67E8F9),
-                fontSize = 12.sp,
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.animateContentSize()
+                color = AccentTime,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Medium,
+                modifier = Modifier
+                    .padding(top = 6.dp)
+                    .animateContentSize()
             )
         }
     }
@@ -206,22 +218,19 @@ const val IDLE_ITEM_BT_TETHERING = "bt_tethering"
 /** Row value shown when a tethering state cannot be read on this device. */
 private const val TAP_TO_TOGGLE = "Tap to toggle"
 
+/**
+ * Minimal row icon: a plain 18dp glyph with no badge box behind it. Color is
+ * the only state signal (muted when off, accent when on), which keeps the
+ * menu calm while the on/off state stays readable at a glance.
+ */
 @Composable
-private fun InfoIconBadge(icon: ImageVector, color: Color) {
-    Box(
-        modifier = Modifier
-            .size(34.dp)
-            .clip(RoundedCornerShape(10.dp))
-            .background(color.copy(alpha = 0.18f)),
-        contentAlignment = Alignment.Center
-    ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = null,
-            tint = color,
-            modifier = Modifier.size(19.dp)
-        )
-    }
+private fun InfoIcon(icon: ImageVector, color: Color) {
+    Icon(
+        imageVector = icon,
+        contentDescription = null,
+        tint = color,
+        modifier = Modifier.size(18.dp)
+    )
 }
 
 @Composable
@@ -235,23 +244,24 @@ private fun IdleInfoRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .heightIn(min = 40.dp)
+            .clip(RoundedCornerShape(12.dp))
             .clickable(onClick = onClick),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        InfoIconBadge(icon = icon, color = iconColor)
+        InfoIcon(icon = icon, color = iconColor)
         Text(
             text = label,
             color = Color.White,
             fontSize = 14.sp,
-            fontWeight = FontWeight.SemiBold,
+            fontWeight = FontWeight.Normal,
             modifier = Modifier.weight(1f)
         )
         Text(
             text = value,
-            color = Color(0xFFD5DAE0),
-            fontSize = 13.sp,
-            fontWeight = FontWeight.Medium
+            color = MutedText,
+            fontSize = 12.sp
         )
     }
 }
@@ -310,7 +320,9 @@ private fun readDeviceState(context: Context): IdleDeviceState {
 
     var hotspotText = "Off"
     runCatching {
-        val active = HotspotUtil.isHotspotActive(context)
+        // Layered reader: TetheringManager.getTetheredIfaces (the platform's
+        // own tethered list) → legacy WifiManager reflection → unknown.
+        val active = HotspotUtil.isWifiTetheringActive(context)
         when (active) {
             true -> hotspotText = "On"
             null -> hotspotText = TAP_TO_TOGGLE
@@ -318,18 +330,22 @@ private fun readDeviceState(context: Context): IdleDeviceState {
         }
     }
 
-    // USB tethering brings up the rndis0/usb0 interface — a permission-free,
-    // reliable read. When the probe cannot run at all, show "Tap to toggle".
-    val usbTetheringText = runCatching {
-        val up = java.net.NetworkInterface.getNetworkInterfaces()
-            ?.toList()
-            ?.any { (it.name == "rndis0" || it.name == "usb0") && it.isUp } == true
-        if (up) "On" else "Off"
-    }.getOrDefault(TAP_TO_TOGGLE)
+    // Same layered reader: TetheredIfaces → USB_STATE sticky broadcast →
+    // gadget-interface probe (rndis/usb/ncm). Unknown only when the device
+    // offers none of these.
+    val usbTetheringText = when (HotspotUtil.isUsbTetheringActive(context)) {
+        true -> "On"
+        null -> TAP_TO_TOGGLE
+        false -> "Off"
+    }
 
-    // Bluetooth tethering (PAN) state is a hidden, permission-guarded API with
-    // no permission-free read — show the best available state instead.
-    val btTetheringText = TAP_TO_TOGGLE
+    // Bluetooth PAN: TetheredIfaces when the platform reports it, otherwise
+    // the honest "unknown" instead of a wrong On/Off.
+    val btTetheringText = when (HotspotUtil.isBluetoothTetheringActive(context)) {
+        true -> "On"
+        null -> TAP_TO_TOGGLE
+        false -> "Off"
+    }
 
     return IdleDeviceState(
         timeText = timeText,

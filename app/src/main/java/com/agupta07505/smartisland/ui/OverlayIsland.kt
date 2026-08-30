@@ -17,8 +17,6 @@ import androidx.compose.ui.platform.LocalContext
 import com.agupta07505.smartisland.data.AppShortcutProvider
 import com.agupta07505.smartisland.data.LaunchableApp
 import com.agupta07505.smartisland.model.IslandNotification
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -31,12 +29,6 @@ fun OverlayIsland(
     onOpenFloatingWindow: () -> Unit,
     modifier: Modifier = Modifier,
     isFullWidth: Boolean = true,
-    // Published by SmartIslandOverlayService: dp offset of the actual overlay
-    // window center from the screen center (0f for full-width windows). Passed
-    // down to IslandOverlayView, which subtracts it from every rendered
-    // x-translation so the collapsed content stays anchored to the screen while
-    // the narrow collapsed window resizes mid-animation.
-    windowCenterOffsetFlow: StateFlow<Float> = MutableStateFlow(0f),
     onOpenIdleInfoItem: (String) -> Unit = {},
     onExpandedWindowContentSize: (Int, Int) -> Unit = { _, _ -> }
 ) {
@@ -48,7 +40,6 @@ fun OverlayIsland(
     val isInputActive by viewModel.isInputActive.collectAsState()
     val menuFeedback by viewModel.menuFeedback.collectAsState()
     val reappearTick by viewModel.reappearTick.collectAsState()
-    val windowCenterOffsetDp by windowCenterOffsetFlow.collectAsState()
     val context = LocalContext.current
 
     val isContentRedacted = isLocked && settings.lockScreenPrivacy == "AppIconOnly"
@@ -109,7 +100,6 @@ fun OverlayIsland(
         isInputActive = isInputActive,
         onReplyStateChanged = { viewModel.setInputActive(it) },
         isFullWidth = isFullWidth,
-        windowCenterOffsetDp = windowCenterOffsetDp,
         onOpenIdleInfoItem = onOpenIdleInfoItem,
         menuFeedback = menuFeedback,
         reappearTick = reappearTick,
