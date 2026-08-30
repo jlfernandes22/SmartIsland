@@ -96,7 +96,7 @@ class SmartIslandOverlayService : AccessibilityService() {
     // updateWindowLayoutParams AND collapsedParams, right before the window
     // relayout, so the recomposition and the window resize land on the same
     // frame.
-    private val windowCenterOffsetFlow: StateFlow<Float> = MutableStateFlow(0f)
+    private val windowCenterOffsetFlow: MutableStateFlow<Float> = MutableStateFlow(0f)
     // Content-sized expanded window (touch-passthrough fallback): reported by the
     // Compose tree when the hidden touchableRegion API is unavailable, so the
     // expanded window can be sized to the card instead of swallowing the screen.

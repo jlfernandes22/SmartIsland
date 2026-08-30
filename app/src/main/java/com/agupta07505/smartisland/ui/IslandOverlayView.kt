@@ -137,6 +137,7 @@ fun IslandOverlayView(
     val context = LocalContext.current
     val displayMetrics = context.resources.displayMetrics
     val density = LocalDensity.current
+    val windowCenterOffsetPx = windowCenterOffsetDp * density.density
     val screenWidth = with(density) { displayMetrics.widthPixels.toDp() }
     val screenCenter = screenWidth / 2f
     val expandedWidth = ((displayMetrics.widthPixels / displayMetrics.density) * EXPANDED_WIDTH_RATIO).dp
@@ -459,7 +460,7 @@ fun IslandOverlayView(
                         // Screen-anchored: cancel the window-center offset so
                         // this target tracks the pill wherever the window sits.
                         translationX = collapsedMainOffset.toPx() -
-                            windowCenterOffsetDp * density
+                            windowCenterOffsetPx
                     }
                     .pointerInput(Unit) {
                         detectTapGestures {
@@ -486,7 +487,7 @@ fun IslandOverlayView(
                     // = screenCenter + target for every window geometry, so the
                     // delayed collapse-window resize cannot move the pill.
                     translationX = animatedXOffset.toPx() -
-                        windowCenterOffsetDp * density
+                        windowCenterOffsetPx
                     translationY = yOffset.toPx() + dragOffset
                     scaleX = switchScaleAnim.value
                     scaleY = switchScaleAnim.value
@@ -676,7 +677,7 @@ fun IslandOverlayView(
                     .absoluteOffset {
                         IntOffset(
                             secondaryOffset.roundToPx() -
-                                (windowCenterOffsetDp * density).roundToInt(),
+                                (windowCenterOffsetPx).roundToInt(),
                             0
                         )
                     }
@@ -747,7 +748,7 @@ fun IslandOverlayView(
                     .absoluteOffset {
                         IntOffset(
                             tertiaryOffset.roundToPx() -
-                                (windowCenterOffsetDp * density).roundToInt(),
+                                (windowCenterOffsetPx).roundToInt(),
                             0
                         )
                     }
