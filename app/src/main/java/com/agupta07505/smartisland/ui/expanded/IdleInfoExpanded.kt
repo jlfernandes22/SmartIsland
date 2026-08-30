@@ -30,8 +30,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.BatteryChargingFull
 import androidx.compose.material.icons.rounded.Bluetooth
 import androidx.compose.material.icons.rounded.BluetoothConnected
-import androidx.compose.material.icons.rounded.BluetoothSearching
-import androidx.compose.material.icons.rounded.Usb
 import androidx.compose.material.icons.rounded.WifiTethering
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -64,9 +62,7 @@ private data class IdleDeviceState(
     val batteryCharging: Boolean,
     val bluetoothText: String,
     val bluetoothOn: Boolean,
-    val hotspotText: String,
-    val usbTetheringText: String,
-    val btTetheringText: String
+    val hotspotText: String
 )
 
 // Height clamp shared with the measured-height reporting in
@@ -92,9 +88,7 @@ fun idleInfoMenuHeightDp(settings: SmartIslandSettings, availableWidthDp: Float)
         settings.idleInfoShowTime,
         settings.idleInfoShowBattery,
         settings.idleInfoShowBluetooth,
-        settings.idleInfoShowHotspot,
-        settings.idleInfoShowUsbTethering,
-        settings.idleInfoShowBtTethering
+        settings.idleInfoShowHotspot
     )
     val tileCount = tileEnabled.count { it }
     if (tileCount == 0) {
@@ -111,8 +105,8 @@ fun idleInfoMenuHeightDp(settings: SmartIslandSettings, availableWidthDp: Float)
 }
 
 // Minimal palette: icons rest in muted grey and light up with a functional
-// accent only while the radio/tether is actually on. White-on-black, no
-// badges, no labels — the menu reads as a quiet strip of glyphs.
+// accent only while the radio is actually on. White-on-black, no badges, no
+// labels — the menu reads as a quiet strip of glyphs.
 private val Muted = Color(0xFF8E99A4)
 private val MutedText = Color(0xFF9AA4AF)
 private val AccentOn = Color(0xFF10B981)
@@ -120,8 +114,8 @@ private val AccentBluetooth = Color(0xFF2563EB)
 private val AccentHotspot = Color(0xFFF59E0B)
 private val AccentTime = Color(0xFF38BDF8)
 
-// Tile geometry: everything lives on a 44dp grid so six enabled items still
-// form a single icon row inside the expanded card (6*44 + 5*8 = 304dp).
+// Tile geometry: everything lives on a 44dp grid so four enabled items still
+// form a single icon row inside the expanded card (4*44 + 3*8 = 200dp).
 private val TileSize = 44.dp
 private val TileCorner = 14.dp
 private val TileGap = 8.dp
@@ -138,7 +132,7 @@ fun IdleInfoExpanded(
     // probes; run them on IO so the 1s menu refresh never janks the overlay's
     // main thread.
     val state by produceState(
-        initialValue = IdleDeviceState("", "", "", false, "", false, "", "", "")
+        initialValue = IdleDeviceState("", "", "", false, "", false, "")
     ) {
         while (true) {
             value = withContext(Dispatchers.IO) { readDeviceState(context) }
@@ -198,34 +192,12 @@ fun IdleInfoExpanded(
                     onItemClick(IDLE_ITEM_HOTSPOT)
                 }
             }
-            if (settings.idleInfoShowUsbTethering) {
-                ToggleTile(
-                    icon = Icons.Rounded.Usb,
-                    label = "USB tethering",
-                    on = state.usbTetheringText == "On",
-                    accent = AccentOn
-                ) {
-                    onItemClick(IDLE_ITEM_USB_TETHERING)
-                }
-            }
-            if (settings.idleInfoShowBtTethering) {
-                ToggleTile(
-                    icon = Icons.Rounded.BluetoothSearching,
-                    label = "Bluetooth tethering",
-                    on = state.btTetheringText == "On",
-                    accent = AccentBluetooth
-                ) {
-                    onItemClick(IDLE_ITEM_BT_TETHERING)
-                }
-            }
         }
 
         if (!settings.idleInfoShowTime &&
             !settings.idleInfoShowBattery &&
             !settings.idleInfoShowBluetooth &&
-            !settings.idleInfoShowHotspot &&
-            !settings.idleInfoShowUsbTethering &&
-            !settings.idleInfoShowBtTethering
+            !settings.idleInfoShowHotspot
         ) {
             Text(
                 text = "All info items are disabled",
@@ -257,8 +229,6 @@ const val IDLE_ITEM_TIME = "time"
 const val IDLE_ITEM_BATTERY = "battery"
 const val IDLE_ITEM_BLUETOOTH = "bluetooth"
 const val IDLE_ITEM_HOTSPOT = "hotspot"
-const val IDLE_ITEM_USB_TETHERING = "usb_tethering"
-const val IDLE_ITEM_BT_TETHERING = "bt_tethering"
 
 /**
  * Clock tile: the HH:mm readout IS the content — the only tile that is pure
@@ -425,23 +395,6 @@ private fun readDeviceState(context: Context): IdleDeviceState {
         }
     }
 
-    // Same layered reader: TetheredIfaces → USB_STATE sticky broadcast →
-    // gadget-interface probe (rndis/usb/ncm). Unknown only when the device
-    // offers none of these.
-    val usbTetheringText = when (HotspotUtil.isUsbTetheringActive(context)) {
-        true -> "On"
-        null -> "Tap to toggle"
-        false -> "Off"
-    }
-
-    // Bluetooth PAN: TetheredIfaces when the platform reports it, otherwise
-    // the honest "unknown" instead of a wrong On/Off.
-    val btTetheringText = when (HotspotUtil.isBluetoothTetheringActive(context)) {
-        true -> "On"
-        null -> "Tap to toggle"
-        false -> "Off"
-    }
-
     return IdleDeviceState(
         timeText = timeText,
         dateText = dateText,
@@ -449,8 +402,6 @@ private fun readDeviceState(context: Context): IdleDeviceState {
         batteryCharging = batteryCharging,
         bluetoothText = bluetoothText,
         bluetoothOn = bluetoothOn,
-        hotspotText = hotspotText,
-        usbTetheringText = usbTetheringText,
-        btTetheringText = btTetheringText
+        hotspotText = hotspotText
     )
 }

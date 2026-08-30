@@ -23,10 +23,11 @@ package com.agupta07505.smartisland.shizuku;
 interface ITetheringUserService {
 
     /**
-     * Starts or stops a tethering type through TetheringManager.
+     * Starts or stops the Wi-Fi hotspot through TetheringManager.
      *
-     * @param type one of TetheringManager.TETHERING_WIFI (0),
-     *             TETHERING_USB (1) or TETHERING_BLUETOOTH (2).
+     * @param type TetheringManager.TETHERING_WIFI (0). The USB and Bluetooth
+     *             tethering rows no longer exist; any other value is rejected
+     *             with the local ERR_UNAVAILABLE code.
      * @param enable true to start, false to stop.
      * @return 0 (TETHER_ERROR_NO_ERROR) on confirmed success; the platform's
      *         TETHER_ERROR_* code when the platform rejected the request;

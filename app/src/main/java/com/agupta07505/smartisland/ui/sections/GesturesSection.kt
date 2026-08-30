@@ -251,18 +251,6 @@ fun GesturesSection(
                         checked = settings.idleInfoShowHotspot,
                         onCheckedChange = { scope.launch { repository.setIdleInfoShowHotspot(it) } }
                     )
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f))
-                    IdleInfoToggleRow(
-                        label = stringResource(R.string.idle_info_usb_tethering_title),
-                        checked = settings.idleInfoShowUsbTethering,
-                        onCheckedChange = { scope.launch { repository.setIdleInfoShowUsbTethering(it) } }
-                    )
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f))
-                    IdleInfoToggleRow(
-                        label = stringResource(R.string.idle_info_bt_tethering_title),
-                        checked = settings.idleInfoShowBtTethering,
-                        onCheckedChange = { scope.launch { repository.setIdleInfoShowBtTethering(it) } }
-                    )
                 }
             }
         }

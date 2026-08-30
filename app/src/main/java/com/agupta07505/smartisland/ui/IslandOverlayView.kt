@@ -26,14 +26,10 @@ import androidx.compose.ui.input.pointer.changedToUp
 import androidx.compose.ui.input.pointer.positionChange
 import kotlin.math.abs
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.snapshotFlow
-import kotlinx.coroutines.flow.filter
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.absoluteOffset
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.requiredWidth
 import androidx.compose.foundation.layout.size
@@ -106,8 +102,7 @@ fun IslandOverlayView(
     onOpenIdleInfoItem: (String) -> Unit = {},
     menuFeedback: String? = null,
     reappearTick: Int = 0,
-    onExpandedWindowContentSize: (Int, Int) -> Unit = { _, _ -> },
-    onCollapsedContentFit: () -> Unit = {}
+    onExpandedWindowContentSize: (Int, Int) -> Unit = { _, _ -> }
 ) {
     // Fix #1: rememberUpdatedState ensures the lambda is always fresh
     // even though pointerInput(Unit) never restarts its coroutine
@@ -172,9 +167,7 @@ fun IslandOverlayView(
         settings.idleInfoShowTime,
         settings.idleInfoShowBattery,
         settings.idleInfoShowBluetooth,
-        settings.idleInfoShowHotspot,
-        settings.idleInfoShowUsbTethering,
-        settings.idleInfoShowBtTethering
+        settings.idleInfoShowHotspot
     ) {
         if (notifications.isEmpty()) {
             if (settings.idleTapMode == SmartIslandSettings.IdleTapModes.INFO) {
@@ -371,28 +364,6 @@ fun IslandOverlayView(
                 with(density) { quantizedHeightDp.roundToPx() }
             )
         }
-    }
-
-    // COLLAPSED-WINDOW RESIZE TIMING (post-settle flicker fix):
-    // The service must narrow the overlay window to the collapsed group extent
-    // (touch passthrough on devices without the touchableRegion API), and the
-    // surface resize is only invisible while the collapse morph is still
-    // moving. Resizing on a SETTLED screen (the previous fixed 480ms delay)
-    // flashes the right-side companion bubbles toward the window center for a
-    // frame or two — a brief jump to the LEFT right after the collapse lands.
-    // The window may be narrowed as soon as the animated pill width has
-    // dropped to its collapsed target: from that moment the content fits the
-    // narrow window, so nothing can clip, and the resize lands mid-morph where
-    // motion masks it (the original upstream resizes at a fixed 220ms for the
-    // same reason). The service also keeps its delayed resize as a backstop;
-    // both paths converge on the same WindowManager params, so whichever runs
-    // second is a no-op.
-    LaunchedEffect(expanded) {
-        if (expanded) return@LaunchedEffect
-        snapshotFlow { width <= effectiveWidth.dp }
-            .filter { it }
-            .first()
-        onCollapsedContentFit()
     }
 
     // Dual Pill (Multi-Tasking Split Island) Detection:
@@ -675,11 +646,24 @@ fun IslandOverlayView(
                 }
             }
 
-            // Expanded content layer — smoothly fade out while collapsing
+            // Expanded content layer — smoothly fade out while collapsing.
+            // The layer is REQUIRED-WIDTH pinned at the final expanded width
+            // instead of tracking the animating pill width: pages and the
+            // info menu lay out ONCE at their real width from the first
+            // frame, so nothing re-flows (and re-measures height) while the
+            // width spring expands. (Plain .width() would be coerced back to
+            // the pill's animating width by the incoming constraints —
+            // requiredWidth is what actually pins it.) The previous
+            // fillMaxWidth chain re-wrapped the icon grid on every width
+            // frame, which kept retargeting the height spring late into the
+            // settle — the small upward shift right after the menu finished
+            // opening. Overflow is clipped by the pill's rounded clip;
+            // mid-morph the layer is fading in/out and the crossfade masks
+            // the wider-than-card content.
             if (expanded || expandedAlpha > 0.01f) {
                 Box(
                     modifier = Modifier
-                        .fillMaxWidth()
+                        .requiredWidth(expandedWidth)
                         .wrapContentHeight()
                         .graphicsLayer {
                             alpha = expandedAlpha

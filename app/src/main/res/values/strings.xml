@@ -273,8 +273,6 @@
     <string name="idle_info_battery_title">Show Battery Level</string>
     <string name="idle_info_bluetooth_title">Show Bluetooth Status</string>
     <string name="idle_info_hotspot_title">Show Hotspot Toggle</string>
-    <string name="idle_info_usb_tethering_title">Show USB Tethering Toggle</string>
-    <string name="idle_info_bt_tethering_title">Show Bluetooth Tethering Toggle</string>
 
     <!-- Notifications & Privacy Rules -->
     <string name="oem_rules_title">Device Profile &amp; OEM Rules</string>

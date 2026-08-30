@@ -12,7 +12,6 @@ import android.app.PendingIntent
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.os.Build
 import android.provider.Settings
 import android.widget.Toast
@@ -99,50 +98,6 @@ object HotspotUtil {
             return ifaces.any { ifaceMatchesKind(it, "wifi") }
         }
         return isHotspotActive(context)
-    }
-
-    fun isUsbTetheringActive(context: Context): Boolean? {
-        tetheredIfaces(context)?.let { ifaces ->
-            return ifaces.any { ifaceMatchesKind(it, "usb") }
-        }
-        // USB_STATE sticky broadcast: the active USB gadget functions appear as
-        // boolean extras ("rndis", "ncm"). Permission-free and set by the
-        // platform whenever USB tethering's function is configured.
-        runCatching {
-            val filter = IntentFilter("android.hardware.usb.action.USB_STATE")
-            val sticky = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                context.applicationContext.registerReceiver(null, filter, Context.RECEIVER_EXPORTED)
-            } else {
-                @Suppress("UnspecifiedRegisterReceiverFlag")
-                context.applicationContext.registerReceiver(null, filter)
-            }
-            if (sticky != null &&
-                (sticky.getBooleanExtra("rndis", false) || sticky.getBooleanExtra("ncm", false))
-            ) {
-                return true
-            }
-        }
-        // Interface probe: enabling USB tethering brings up the gadget
-        // interface. Name prefixes only — rndis/usb/ncm interfaces cannot
-        // exist unless the USB gadget created them.
-        return runCatching {
-            val interfaces = java.net.NetworkInterface.getNetworkInterfaces()
-                ?: return@runCatching null
-            val up = interfaces.toList().any {
-                it.isUp && ifaceMatchesKind(it.name.lowercase().substringBefore('#'), "usb") &&
-                    !it.name.lowercase().startsWith("eth")
-            }
-            up
-        }.getOrNull()
-    }
-
-    fun isBluetoothTetheringActive(context: Context): Boolean? {
-        tetheredIfaces(context)?.let { ifaces ->
-            return ifaces.any { ifaceMatchesKind(it, "bluetooth") }
-        }
-        // Bluetooth PAN state is a hidden, permission-guarded API with no
-        // permission-free read — report "unknown" rather than guessing.
-        return null
     }
 
     /**

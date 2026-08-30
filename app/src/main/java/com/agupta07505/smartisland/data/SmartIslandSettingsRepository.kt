@@ -93,8 +93,6 @@ class SmartIslandSettingsRepository(private val context: Context) {
         val IdleInfoShowBattery = booleanPreferencesKey("idle_info_show_battery")
         val IdleInfoShowBluetooth = booleanPreferencesKey("idle_info_show_bluetooth")
         val IdleInfoShowHotspot = booleanPreferencesKey("idle_info_show_hotspot")
-        val IdleInfoShowUsbTethering = booleanPreferencesKey("idle_info_show_usb_tethering")
-        val IdleInfoShowBtTethering = booleanPreferencesKey("idle_info_show_bt_tethering")
     }
 
     val settings: Flow<SmartIslandSettings> = context.smartIslandDataStore.data
@@ -239,9 +237,7 @@ class SmartIslandSettingsRepository(private val context: Context) {
                 idleInfoShowTime = prefs[Keys.IdleInfoShowTime] ?: defaults.idleInfoShowTime,
                 idleInfoShowBattery = prefs[Keys.IdleInfoShowBattery] ?: defaults.idleInfoShowBattery,
                 idleInfoShowBluetooth = prefs[Keys.IdleInfoShowBluetooth] ?: defaults.idleInfoShowBluetooth,
-                idleInfoShowHotspot = prefs[Keys.IdleInfoShowHotspot] ?: defaults.idleInfoShowHotspot,
-                idleInfoShowUsbTethering = prefs[Keys.IdleInfoShowUsbTethering] ?: defaults.idleInfoShowUsbTethering,
-                idleInfoShowBtTethering = prefs[Keys.IdleInfoShowBtTethering] ?: defaults.idleInfoShowBtTethering
+                idleInfoShowHotspot = prefs[Keys.IdleInfoShowHotspot] ?: defaults.idleInfoShowHotspot
             )
         }
 
@@ -489,12 +485,6 @@ class SmartIslandSettingsRepository(private val context: Context) {
     }
     suspend fun setIdleInfoShowHotspot(value: Boolean) = editSafely {
         it[Keys.IdleInfoShowHotspot] = value
-    }
-    suspend fun setIdleInfoShowUsbTethering(value: Boolean) = editSafely {
-        it[Keys.IdleInfoShowUsbTethering] = value
-    }
-    suspend fun setIdleInfoShowBtTethering(value: Boolean) = editSafely {
-        it[Keys.IdleInfoShowBtTethering] = value
     }
 
     suspend fun resetPosition() = editSafely {

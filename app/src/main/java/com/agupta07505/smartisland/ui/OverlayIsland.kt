@@ -30,8 +30,7 @@ fun OverlayIsland(
     modifier: Modifier = Modifier,
     isFullWidth: Boolean = true,
     onOpenIdleInfoItem: (String) -> Unit = {},
-    onExpandedWindowContentSize: (Int, Int) -> Unit = { _, _ -> },
-    onCollapsedContentFit: () -> Unit = {}
+    onExpandedWindowContentSize: (Int, Int) -> Unit = { _, _ -> }
 ) {
     val settings by viewModel.settings.collectAsState()
     val expanded by viewModel.expanded.collectAsState()
@@ -105,7 +104,6 @@ fun OverlayIsland(
         menuFeedback = menuFeedback,
         reappearTick = reappearTick,
         onExpandedWindowContentSize = onExpandedWindowContentSize,
-        onCollapsedContentFit = onCollapsedContentFit,
         modifier = modifier
     )
 }

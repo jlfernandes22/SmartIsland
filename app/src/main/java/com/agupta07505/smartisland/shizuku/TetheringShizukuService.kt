@@ -24,9 +24,14 @@ import java.util.concurrent.TimeUnit
  *     old command just printed its help text and exited non-zero.
  *  2. TetheringService.startTethering/stopTethering enforce
  *     TETHER_PRIVILEGED (signature|privileged). The platform Shell app
- *     requests exactly that permission in its manifest, so the shell uid holds
- *     it — the same trick that makes `cmd bluetooth_manager enable` work for
- *     the Bluetooth toggle.
+ *     requests exactly that permission in its manifest (and the permission is
+ *     privapp-whitelisted for com.android.shell), so the shell uid holds it —
+ *     the same trick that makes `cmd bluetooth_manager enable` work for the
+ *     Bluetooth toggle.
+ *
+ * Only the Wi-Fi hotspot is dispatched here: the USB and Bluetooth tethering
+ * rows were removed from the info menu entirely (the USB path in particular
+ * could crash the system UI by switching USB gadget functions mid-session).
  *
  * TetheringManager itself is a @SystemApi class (not on the app compile
  * classpath), so every call here goes through reflection. Reflection is safe
@@ -55,16 +60,10 @@ class TetheringShizukuService(private val context: Context) : ITetheringUserServ
     }
 
     override fun setTethering(type: Int, enable: Boolean): Int {
-        if (type !in TETHERING_WIFI..TETHERING_BLUETOOTH) return ERR_UNAVAILABLE
+        if (type != TETHERING_WIFI) return ERR_UNAVAILABLE
         val manager = tetheringManager() ?: return ERR_UNAVAILABLE
         return runCatching {
-            when (type) {
-                // setUsbTethering returns its result code synchronously.
-                TETHERING_USB -> setUsbTethering(manager, enable)
-                TETHERING_WIFI, TETHERING_BLUETOOTH ->
-                    if (enable) startTethering(manager, type) else stopTethering(manager, type)
-                else -> ERR_UNAVAILABLE
-            }
+            if (enable) startTethering(manager, type) else stopTethering(manager, type)
         }.getOrElse {
             Log.e(TAG, "setTethering($type, $enable) failed", it)
             ERR_UNAVAILABLE
@@ -114,7 +113,7 @@ class TetheringShizukuService(private val context: Context) : ITetheringUserServ
     }
 
     /**
-     * TETHERING_WIFI / TETHERING_BLUETOOTH start: startTethering(int, Executor,
+     * TETHERING_WIFI start: startTethering(int, Executor,
      * StartTetheringCallback) answers through the callback, so block on a
      * latch and translate onTetheringFailed(resultCode) into the return value.
      */
@@ -152,20 +151,17 @@ class TetheringShizukuService(private val context: Context) : ITetheringUserServ
     }
 
     /**
-     * TETHERING_WIFI / TETHERING_BLUETOOTH stop: stopTethering(int) is
-     * fire-and-forget on the platform side (its result listener never reports
-     * to callers), so verify by polling getTetheredIfaces() until the kind's
-     * interface disappears from the platform's tethered list.
+     * TETHERING_WIFI stop: stopTethering(int) is fire-and-forget on the
+     * platform side (its result listener never reports to callers), so verify
+     * by polling getTetheredIfaces() until the soft-AP interface disappears
+     * from the platform's tethered list.
      */
     private fun stopTethering(manager: Any, type: Int): Int {
         val managerClass = manager.javaClass
         managerClass.getMethod("stopTethering", Integer.TYPE)
             .invoke(manager, type)
 
-        val kindPrefixes = when (type) {
-            TETHERING_WIFI -> arrayOf("ap", "swlan", "wlan")
-            else -> arrayOf("bt-pan", "btpan")
-        }
+        val kindPrefixes = arrayOf("ap", "swlan", "wlan")
         val deadline = System.currentTimeMillis() + STOP_VERIFY_TIMEOUT_MS
         var stillUp = tetheredIfacesOfType(manager, kindPrefixes)
         while (stillUp && System.currentTimeMillis() < deadline) {
@@ -174,14 +170,6 @@ class TetheringShizukuService(private val context: Context) : ITetheringUserServ
         }
         Log.d(TAG, "stopTethering($type) stillUp=$stillUp")
         return if (stillUp) ERR_STATE_UNCHANGED else TETHER_ERROR_NO_ERROR
-    }
-
-    private fun setUsbTethering(manager: Any, enable: Boolean): Int {
-        val result = manager.javaClass
-            .getMethod("setUsbTethering", java.lang.Boolean.TYPE)
-            .invoke(manager, enable) as Int
-        Log.d(TAG, "setUsbTethering($enable) -> $result")
-        return result
     }
 
     @Suppress("UNCHECKED_CAST")
@@ -202,10 +190,8 @@ class TetheringShizukuService(private val context: Context) : ITetheringUserServ
         private const val SHELL_PACKAGE = "com.android.shell"
         private const val MANAGER_CLASS = "android.net.TetheringManager"
 
-        // TetheringManager.TETHERING_* constants (stable since API 30).
+        // TetheringManager.TETHERING_WIFI constant (stable since API 30).
         const val TETHERING_WIFI = 0
-        const val TETHERING_USB = 1
-        const val TETHERING_BLUETOOTH = 2
 
         // Platform result code for "everything fine" (TETHER_ERROR_NO_ERROR).
         const val TETHER_ERROR_NO_ERROR = 0

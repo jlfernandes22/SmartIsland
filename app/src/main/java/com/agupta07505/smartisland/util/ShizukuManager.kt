@@ -253,33 +253,35 @@ object ShizukuManager {
      * WHY NOT `cmd connectivity tethering` (the old mechanism): that shell
      * command does not exist. AOSP's ConnectivityService shell interface is
      * airplane-mode / firewall chains / package networking only — the command
-     * printed its help text and exited, so hotspot and Bluetooth tethering
-     * never changed state on the device.
+     * printed its help text and exited, so the hotspot never changed state on
+     * the device.
      *
      * Plan A — TetheringManager inside a Shizuku USER SERVICE (see
      * [TetheringShizukuService]): the service runs in the Shizuku server
      * process (uid 2000, shell), and the shell uid holds TETHER_PRIVILEGED
-     * (the platform Shell app requests it). TetheringManager.startTethering
-     * is the exact path the Settings app uses, so the Wi-Fi hotspot starts
-     * with the user's SAVED SSID/password config and Bluetooth tethering
-     * actually flips. The returned result code is authoritative (the platform
-     * answers through StartTetheringCallback / setUsbTethering's return).
+     * (the platform Shell app requests it and the permission is
+     * privapp-whitelisted for com.android.shell). TetheringManager
+     * .startTethering is the exact path the Settings app uses, so the Wi-Fi
+     * hotspot starts with the user's SAVED SSID/password config. The returned
+     * result code is authoritative: startTethering only answers
+     * TETHER_ERROR_NO_ERROR through StartTetheringCallback once the soft-AP
+     * actually reached WIFI_AP_STATE_ENABLED.
      *
-     * Plan B — exec fallbacks for the kinds that have one:
-     *   usb:       `svc usb setFunctions rndis|ncm` / `svc usb setFunctions`
-     *              (blank = charging-only, which tears USB tethering down).
-     *   wifi:      `cmd wifi stop-softap` for the OFF direction only — the
-     *              ON direction needs start-softap with an EXPLICIT ssid/
-     *              passphrase, which would hijack the user's saved hotspot
-     *              config, so it is deliberately not used.
-     *   bluetooth: no shell fallback exists at all.
+     * Plan B — exec fallback when the user service is unreachable:
+     *   wifi: `cmd wifi stop-softap` for the OFF direction only — the ON
+     *         direction needs start-softap with an EXPLICIT ssid/passphrase,
+     *         which would hijack the user's saved hotspot config, so it is
+     *         deliberately not used.
+     *
+     * Only "wifi" exists: the USB and Bluetooth tethering rows were removed
+     * from the info menu entirely.
      *
      * No dialogs, no settings pages, no shade pull-down — the overlay island
-     * stays untouched. Callers MUST still verify the actual state change with
-     * whatever reader is available (SmartIslandOverlayService does).
+     * stays untouched. The result code IS the verification (both directions
+     * confirm platform-side before answering), so callers can surface it
+     * directly as in-menu feedback.
      *
-     * @param kind "wifi" (Wi-Fi hotspot), "usb" (USB tethering) or "bluetooth"
-     *        (Bluetooth tethering).
+     * @param kind "wifi" (Wi-Fi hotspot).
      * @return success when a mechanism dispatched the request AND the
      *         mechanism itself reported success. Failure carries the reason.
      */
@@ -315,14 +317,8 @@ object ShizukuManager {
             // userServiceCode == null (service unreachable) or ERR_UNAVAILABLE
             // (service-side infra failure): try the shell fallbacks below.
 
-            // Plan B: exec fallbacks.
+            // Plan B: exec fallback when the user service is unreachable.
             val commands = when (kind) {
-                "usb" -> if (enable) {
-                    listOf("svc usb setFunctions rndis || svc usb setFunctions ncm")
-                } else {
-                    // Blank function list = charging-only: tears down rndis/ncm.
-                    listOf("svc usb setFunctions")
-                }
                 "wifi" -> if (enable) {
                     emptyList()
                 } else {
@@ -352,25 +348,6 @@ object ShizukuManager {
             // DeadObject: the user service process was killed between calls.
             // Drop the cached binder so the next toggle rebinds fresh.
             android.util.Log.w("ShizukuManager", "Tethering user service binder dead", t)
-            tetheringServiceBinder = null
-            null
-        }
-    }
-
-    /**
-     * The platform's live tethered-interface list, read through the user
-     * service (shell uid — not subject to the hidden-API reflection block
-     * that silences the same read in the app process). Returns null when the
-     * service is unreachable or answers with nothing, so the caller falls
-     * back to its in-process readers.
-     */
-    suspend fun tetheredIfacesViaUserService(): List<String>? {
-        val service = tetheringUserService() ?: return null
-        return try {
-            val raw = service.tetheredIfaces
-            if (raw.isBlank()) null else raw.split('|').filter { it.isNotBlank() }
-        } catch (t: Throwable) {
-            android.util.Log.w("ShizukuManager", "Tethering ifaces read failed", t)
             tetheringServiceBinder = null
             null
         }
@@ -431,8 +408,23 @@ object ShizukuManager {
         return bound
     }
 
-    /** Valid [toggleTethering] kinds, mirroring the shell command's types. */
-    val TETHERING_KINDS = setOf("wifi", "usb", "bluetooth")
+    /**
+     * Pre-binds the tethering user service so the first hotspot tap dispatches
+     * immediately instead of paying the cold-start bind latency. Fire-and-
+     * forget: callers launch this on a background dispatcher when the info
+     * menu opens; failures are harmless (the toggle rebinds on demand).
+     */
+    suspend fun warmUpTetheringUserService() {
+        withContext(Dispatchers.IO) {
+            runCatching { tetheringServiceBinder() }
+                .onFailure {
+                    android.util.Log.w("ShizukuManager", "Tethering service warmup failed", it)
+                }
+        }
+    }
+
+    /** Valid [toggleTethering] kinds. Only the Wi-Fi hotspot remains. */
+    val TETHERING_KINDS = setOf("wifi")
 
     /**
      * Short, menu-ready text for a failed tethering dispatch. The overlay
@@ -455,9 +447,7 @@ object ShizukuManager {
 
     /** kinds → TetheringManager.TETHERING_* types (stable since API 30). */
     private val TETHERING_TYPES = mapOf(
-        "wifi" to TetheringShizukuService.TETHERING_WIFI,
-        "usb" to TetheringShizukuService.TETHERING_USB,
-        "bluetooth" to TetheringShizukuService.TETHERING_BLUETOOTH
+        "wifi" to TetheringShizukuService.TETHERING_WIFI
     )
 
     /** Cached user-service binder; null until first bind / after death. */
@@ -468,6 +458,6 @@ object ShizukuManager {
     private var tetheringServiceConnection: ServiceConnection? = null
 
     /** Bump whenever [TetheringShizukuService] or its AIDL changes shape. */
-    private const val USER_SERVICE_VERSION = 2
+    private const val USER_SERVICE_VERSION = 3
     private const val USER_SERVICE_BIND_TIMEOUT_MS = 6000L
 }
