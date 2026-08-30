@@ -37,6 +37,9 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
+        // Shizuku user-service AIDL (ITetheringUserService) for the
+        // shell-uid tethering toggle path.
+        aidl = true
     }
 
     signingConfigs {

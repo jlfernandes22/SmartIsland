@@ -47,3 +47,15 @@
     public java.lang.String getAction();
     public java.lang.CharSequence getName();
 }
+
+# --- Shizuku tethering user service -------------------------------------
+# TetheringShizukuService is instantiated REFLECTIVELY by the Shizuku server
+# process (uid shell), never by app code, and the AIDL stub is reached only
+# through binder marshalling — both must survive R8 in release builds.
+-keep class com.agupta07505.smartisland.shizuku.TetheringShizukuService {
+    public <init>(android.content.Context);
+    public int setTethering(int, boolean);
+    public void exit();
+}
+-keep class com.agupta07505.smartisland.shizuku.ITetheringUserService { *; }
+-keep class com.agupta07505.smartisland.shizuku.ITetheringUserService$* { *; }

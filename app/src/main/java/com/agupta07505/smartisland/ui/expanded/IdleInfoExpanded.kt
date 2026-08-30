@@ -9,25 +9,27 @@ package com.agupta07505.smartisland.ui.expanded
 
 import android.bluetooth.BluetoothAdapter
 import android.content.Context
-import android.content.Intent
-import android.content.IntentFilter
 import android.os.BatteryManager
 import android.os.Build
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.animation.animateContentSize
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.BatteryChargingFull
 import androidx.compose.material.icons.rounded.Bluetooth
 import androidx.compose.material.icons.rounded.BluetoothConnected
-import androidx.compose.material.icons.rounded.Schedule
+import androidx.compose.material.icons.rounded.BluetoothSearching
 import androidx.compose.material.icons.rounded.Usb
 import androidx.compose.material.icons.rounded.WifiTethering
 import androidx.compose.material3.Icon
@@ -39,9 +41,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.agupta07505.smartisland.data.SmartIslandSettings
@@ -65,16 +66,23 @@ private data class IdleDeviceState(
     val btTetheringText: String
 )
 
-// Minimal palette: one muted resting tone, functional accents only when a
-// radio/tether is actually on. Everything else is white-on-black with lots of
-// negative space — the menu reads as a quiet list, not a dashboard.
-private val Muted = Color(0xFF94A3B8)
+// Minimal palette: icons rest in muted grey and light up with a functional
+// accent only while the radio/tether is actually on. White-on-black, no
+// badges, no labels — the menu reads as a quiet strip of glyphs.
+private val Muted = Color(0xFF8E99A4)
 private val MutedText = Color(0xFF9AA4AF)
-private val AccentTime = Color(0xFF38BDF8)
 private val AccentOn = Color(0xFF10B981)
 private val AccentBluetooth = Color(0xFF2563EB)
 private val AccentHotspot = Color(0xFFF59E0B)
+private val AccentTime = Color(0xFF38BDF8)
 
+// Tile geometry: everything lives on a 44dp grid so six enabled items still
+// form a single icon row inside the expanded card (6*44 + 5*8 = 304dp).
+private val TileSize = 44.dp
+private val TileCorner = 14.dp
+private val TileGap = 8.dp
+
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun IdleInfoExpanded(
     settings: SmartIslandSettings,
@@ -97,85 +105,75 @@ fun IdleInfoExpanded(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(start = 18.dp, top = 10.dp, end = 18.dp, bottom = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(2.dp)
+            .padding(start = 12.dp, top = 8.dp, end = 12.dp, bottom = 8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        if (settings.idleInfoShowTime) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 46.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .clickable { onItemClick(IDLE_ITEM_TIME) },
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                InfoIcon(icon = Icons.Rounded.Schedule, color = AccentTime)
-                Column {
-                    Text(
-                        text = state.timeText,
-                        color = Color.White,
-                        fontSize = 22.sp,
-                        lineHeight = 24.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    Text(
-                        text = state.dateText,
-                        color = Muted,
-                        fontSize = 11.sp
-                    )
+        // Icon-first grid: one tile per enabled info item, no text rows. FlowRow
+        // only wraps on very narrow cards; with every item enabled the tiles
+        // still fit a single line on the 0.95 screen-width card.
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(TileGap, Alignment.CenterHorizontally),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            if (settings.idleInfoShowTime) {
+                TimeTile(timeText = state.timeText.ifEmpty { "--:--" }) {
+                    onItemClick(IDLE_ITEM_TIME)
                 }
             }
-        }
-
-        if (settings.idleInfoShowBattery) {
-            IdleInfoRow(
-                icon = Icons.Rounded.BatteryChargingFull,
-                iconColor = if (state.batteryCharging) AccentOn else Muted,
-                label = "Battery",
-                value = state.batteryText,
-                onClick = { onItemClick(IDLE_ITEM_BATTERY) }
-            )
-        }
-
-        if (settings.idleInfoShowBluetooth) {
-            IdleInfoRow(
-                icon = if (state.bluetoothOn) Icons.Rounded.BluetoothConnected else Icons.Rounded.Bluetooth,
-                iconColor = if (state.bluetoothOn) AccentBluetooth else Muted,
-                label = "Bluetooth",
-                value = state.bluetoothText,
-                onClick = { onItemClick(IDLE_ITEM_BLUETOOTH) }
-            )
-        }
-
-        if (settings.idleInfoShowHotspot) {
-            IdleInfoRow(
-                icon = Icons.Rounded.WifiTethering,
-                iconColor = if (state.hotspotText == "On") AccentHotspot else Muted,
-                label = "Hotspot",
-                value = state.hotspotText,
-                onClick = { onItemClick(IDLE_ITEM_HOTSPOT) }
-            )
-        }
-
-        if (settings.idleInfoShowUsbTethering) {
-            IdleInfoRow(
-                icon = Icons.Rounded.Usb,
-                iconColor = if (state.usbTetheringText == "On") AccentOn else Muted,
-                label = "USB Tethering",
-                value = state.usbTetheringText,
-                onClick = { onItemClick(IDLE_ITEM_USB_TETHERING) }
-            )
-        }
-
-        if (settings.idleInfoShowBtTethering) {
-            IdleInfoRow(
-                icon = if (state.bluetoothOn) Icons.Rounded.BluetoothConnected else Icons.Rounded.Bluetooth,
-                iconColor = if (state.btTetheringText == "On") AccentBluetooth else Muted,
-                label = "Bluetooth Tethering",
-                value = state.btTetheringText,
-                onClick = { onItemClick(IDLE_ITEM_BT_TETHERING) }
-            )
+            if (settings.idleInfoShowBattery) {
+                DataTile(
+                    icon = Icons.Rounded.BatteryChargingFull,
+                    label = "Battery",
+                    tint = if (state.batteryCharging) AccentOn else Muted,
+                    highlight = state.batteryCharging,
+                    highlightColor = AccentOn,
+                    badgeText = state.batteryText.substringBefore(" ").ifEmpty { "--" }
+                ) {
+                    onItemClick(IDLE_ITEM_BATTERY)
+                }
+            }
+            if (settings.idleInfoShowBluetooth) {
+                ToggleTile(
+                    icon = if (state.bluetoothOn) Icons.Rounded.BluetoothConnected else Icons.Rounded.Bluetooth,
+                    label = "Bluetooth",
+                    on = state.bluetoothOn,
+                    accent = AccentBluetooth
+                ) {
+                    onItemClick(IDLE_ITEM_BLUETOOTH)
+                }
+            }
+            if (settings.idleInfoShowHotspot) {
+                ToggleTile(
+                    icon = Icons.Rounded.WifiTethering,
+                    label = "Hotspot",
+                    on = state.hotspotText == "On",
+                    accent = AccentHotspot
+                ) {
+                    onItemClick(IDLE_ITEM_HOTSPOT)
+                }
+            }
+            if (settings.idleInfoShowUsbTethering) {
+                ToggleTile(
+                    icon = Icons.Rounded.Usb,
+                    label = "USB tethering",
+                    on = state.usbTetheringText == "On",
+                    accent = AccentOn
+                ) {
+                    onItemClick(IDLE_ITEM_USB_TETHERING)
+                }
+            }
+            if (settings.idleInfoShowBtTethering) {
+                ToggleTile(
+                    icon = Icons.Rounded.BluetoothSearching,
+                    label = "Bluetooth tethering",
+                    on = state.btTetheringText == "On",
+                    accent = AccentBluetooth
+                ) {
+                    onItemClick(IDLE_ITEM_BT_TETHERING)
+                }
+            }
         }
 
         if (!settings.idleInfoShowTime &&
@@ -188,21 +186,23 @@ fun IdleInfoExpanded(
             Text(
                 text = "All info items are disabled",
                 color = Muted,
-                fontSize = 11.sp
+                fontSize = 10.sp,
+                textAlign = TextAlign.Center
             )
         }
 
-        // In-island action feedback (e.g. "Bluetooth on", "Turning Bluetooth…"):
+        // In-island action feedback (e.g. "Bluetooth on", "Hotspot on"):
         // the test device suppresses Toasts for this app, so results are shown
-        // here instead. Rendered last so the rows never shift position.
+        // here instead. Rendered last so the tiles never shift position.
         if (feedback != null) {
             Text(
                 text = feedback,
                 color = AccentTime,
-                fontSize = 11.sp,
+                fontSize = 10.sp,
                 fontWeight = FontWeight.Medium,
+                textAlign = TextAlign.Center,
                 modifier = Modifier
-                    .padding(top = 6.dp)
+                    .fillMaxWidth()
                     .animateContentSize()
             )
         }
@@ -216,53 +216,103 @@ const val IDLE_ITEM_HOTSPOT = "hotspot"
 const val IDLE_ITEM_USB_TETHERING = "usb_tethering"
 const val IDLE_ITEM_BT_TETHERING = "bt_tethering"
 
-/** Row value shown when a tethering state cannot be read on this device. */
-private const val TAP_TO_TOGGLE = "Tap to toggle"
-
 /**
- * Minimal row icon: a plain 18dp glyph with no badge box behind it. Color is
- * the only state signal (muted when off, accent when on), which keeps the
- * menu calm while the on/off state stays readable at a glance.
+ * Clock tile: the HH:mm readout IS the content — the only tile that is pure
+ * text. Tap opens the clock app (service-side behavior, unchanged).
  */
 @Composable
-private fun InfoIcon(icon: ImageVector, color: Color) {
-    Icon(
-        imageVector = icon,
-        contentDescription = null,
-        tint = color,
-        modifier = Modifier.size(18.dp)
-    )
+private fun TimeTile(timeText: String, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .width(TileSize)
+            .height(TileSize)
+            .clip(RoundedCornerShape(TileCorner))
+            .background(Color.White.copy(alpha = 0.05f))
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = timeText,
+            color = Color.White,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            textAlign = TextAlign.Center
+        )
+    }
 }
 
+/**
+ * Data tile: a small glyph with a tiny one-line readout underneath (battery
+ * percent). State shows through the tint only — no chrome, no borders.
+ */
 @Composable
-private fun IdleInfoRow(
-    icon: ImageVector,
-    iconColor: Color,
+private fun DataTile(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
     label: String,
-    value: String,
+    tint: Color,
+    highlight: Boolean,
+    highlightColor: Color,
+    badgeText: String,
     onClick: () -> Unit
 ) {
-    Row(
+    Box(
         modifier = Modifier
-            .fillMaxWidth()
-            .heightIn(min = 40.dp)
-            .clip(RoundedCornerShape(12.dp))
+            .width(TileSize)
+            .height(TileSize)
+            .clip(RoundedCornerShape(TileCorner))
+            .background(if (highlight) highlightColor.copy(alpha = 0.14f) else Color.Transparent)
             .clickable(onClick = onClick),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp)
+        contentAlignment = Alignment.Center
     ) {
-        InfoIcon(icon = icon, color = iconColor)
-        Text(
-            text = label,
-            color = Color.White,
-            fontSize = 14.sp,
-            fontWeight = FontWeight.Normal,
-            modifier = Modifier.weight(1f)
-        )
-        Text(
-            text = value,
-            color = MutedText,
-            fontSize = 12.sp
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = label,
+                tint = tint,
+                modifier = Modifier.size(15.dp)
+            )
+            Text(
+                text = badgeText,
+                color = MutedText,
+                fontSize = 9.sp,
+                lineHeight = 10.sp,
+                fontWeight = FontWeight.Medium,
+                textAlign = TextAlign.Center
+            )
+        }
+    }
+}
+
+/**
+ * Toggle tile: a single glyph on a 44dp tile. Off = muted icon on clear
+ * glass; on = accent icon on a faint accent wash. The wash + icon color is
+ * the whole state display — readable at a glance, silent when idle.
+ */
+@Composable
+private fun ToggleTile(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    on: Boolean,
+    accent: Color,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .width(TileSize)
+            .height(TileSize)
+            .clip(RoundedCornerShape(TileCorner))
+            .background(if (on) accent.copy(alpha = 0.16f) else Color.Transparent)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = label,
+            tint = if (on) accent else Muted,
+            modifier = Modifier.size(20.dp)
         )
     }
 }
@@ -278,12 +328,12 @@ private fun readDeviceState(context: Context): IdleDeviceState {
         val sticky = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             context.registerReceiver(
                 null,
-                IntentFilter(Intent.ACTION_BATTERY_CHANGED),
+                android.content.IntentFilter(Intent.ACTION_BATTERY_CHANGED),
                 Context.RECEIVER_EXPORTED
             )
         } else {
             @Suppress("UnspecifiedRegisterReceiverFlag")
-            context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+            context.registerReceiver(null, android.content.IntentFilter(Intent.ACTION_BATTERY_CHANGED))
         }
         val level = sticky?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
         val scale = sticky?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: 100
@@ -292,7 +342,7 @@ private fun readDeviceState(context: Context): IdleDeviceState {
             val pct = (level * 100 / scale.toFloat()).toInt().coerceIn(0, 100)
             batteryCharging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
                 status == BatteryManager.BATTERY_STATUS_FULL
-            batteryText = if (batteryCharging) "$pct% • Charging" else "$pct%"
+            batteryText = "$pct%"
         }
     }
 
@@ -326,7 +376,7 @@ private fun readDeviceState(context: Context): IdleDeviceState {
         val active = HotspotUtil.isWifiTetheringActive(context)
         when (active) {
             true -> hotspotText = "On"
-            null -> hotspotText = TAP_TO_TOGGLE
+            null -> hotspotText = "Tap to toggle"
             false -> hotspotText = "Off"
         }
     }
@@ -336,7 +386,7 @@ private fun readDeviceState(context: Context): IdleDeviceState {
     // offers none of these.
     val usbTetheringText = when (HotspotUtil.isUsbTetheringActive(context)) {
         true -> "On"
-        null -> TAP_TO_TOGGLE
+        null -> "Tap to toggle"
         false -> "Off"
     }
 
@@ -344,7 +394,7 @@ private fun readDeviceState(context: Context): IdleDeviceState {
     // the honest "unknown" instead of a wrong On/Off.
     val btTetheringText = when (HotspotUtil.isBluetoothTetheringActive(context)) {
         true -> "On"
-        null -> TAP_TO_TOGGLE
+        null -> "Tap to toggle"
         false -> "Off"
     }
 

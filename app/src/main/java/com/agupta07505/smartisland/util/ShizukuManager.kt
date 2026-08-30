@@ -7,16 +7,26 @@
 
 package com.agupta07505.smartisland.util
 
+import android.content.ComponentName
 import android.content.Context
+import android.content.ServiceConnection
 import android.content.pm.PackageManager
+import android.os.IBinder
 import android.provider.Settings
+import com.agupta07505.smartisland.BuildConfig
 import com.agupta07505.smartisland.service.SmartIslandNotificationListenerService
 import com.agupta07505.smartisland.service.SmartIslandOverlayService
+import com.agupta07505.smartisland.shizuku.ITetheringUserService
+import com.agupta07505.smartisland.shizuku.TetheringShizukuService
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import rikka.shizuku.Shizuku
 import java.io.BufferedReader
 import java.io.InputStreamReader
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 object ShizukuManager {
 
@@ -238,23 +248,40 @@ object ShizukuManager {
     }
 
     /**
-     * Toggles a tethering type with shell-level privileges via Shizuku.
+     * Toggles a tethering type with shell-level privileges.
      *
-     * Uses the ConnectivityService shell interface (Android 13+):
-     *   `cmd connectivity tethering <kind> <enable|disable>`
-     * where kind is one of "wifi", "usb" or "bluetooth". `shell` uid holds the
-     * NETWORK_SETTINGS/TETHER_PRIVILEGED-like permissions the tethering shell
-     * command checks, so this works where a normal app's TetheringManager calls
-     * would need a full Settings page round-trip.
+     * WHY NOT `cmd connectivity tethering` (the old mechanism): that shell
+     * command does not exist. AOSP's ConnectivityService shell interface is
+     * airplane-mode / firewall chains / package networking only — the command
+     * printed its help text and exited, so hotspot and Bluetooth tethering
+     * never changed state on the device.
      *
-     * Best-effort by design: some OEM builds may not expose the shell command,
-     * in which case the returned Result fails and the caller shows in-menu
-     * feedback (no dialogs, no settings pages — the island stays untouched).
+     * Plan A — TetheringManager inside a Shizuku USER SERVICE (see
+     * [TetheringShizukuService]): the service runs in the Shizuku server
+     * process (uid 2000, shell), and the shell uid holds TETHER_PRIVILEGED
+     * (the platform Shell app requests it). TetheringManager.startTethering
+     * is the exact path the Settings app uses, so the Wi-Fi hotspot starts
+     * with the user's SAVED SSID/password config and Bluetooth tethering
+     * actually flips. The returned result code is authoritative (the platform
+     * answers through StartTetheringCallback / setUsbTethering's return).
+     *
+     * Plan B — exec fallbacks for the kinds that have one:
+     *   usb:       `svc usb setFunctions rndis|ncm` / `svc usb setFunctions`
+     *              (blank = charging-only, which tears USB tethering down).
+     *   wifi:      `cmd wifi stop-softap` for the OFF direction only — the
+     *              ON direction needs start-softap with an EXPLICIT ssid/
+     *              passphrase, which would hijack the user's saved hotspot
+     *              config, so it is deliberately not used.
+     *   bluetooth: no shell fallback exists at all.
+     *
+     * No dialogs, no settings pages, no shade pull-down — the overlay island
+     * stays untouched. Callers MUST still verify the actual state change with
+     * whatever reader is available (SmartIslandOverlayService does).
      *
      * @param kind "wifi" (Wi-Fi hotspot), "usb" (USB tethering) or "bluetooth"
      *        (Bluetooth tethering).
-     * @return success when the command exited cleanly. Callers SHOULD still
-     *         verify the actual state change with whatever reader is available.
+     * @return success when a mechanism dispatched the request AND the
+     *         mechanism itself reported success. Failure carries the reason.
      */
     suspend fun toggleTethering(kind: String, enable: Boolean): Result<Boolean> =
         withContext(Dispatchers.IO) {
@@ -264,12 +291,144 @@ object ShizukuManager {
                 )
             }
             require(kind in TETHERING_KINDS) { "Unknown tethering kind: $kind" }
-            val action = if (enable) "enable" else "disable"
-            runShizukuCommands(
-                listOf("cmd connectivity tethering $kind $action")
-            ).map { true }
+            val type = TETHERING_TYPES.getValue(kind)
+
+            // Plan A: TetheringManager in the shell-uid user service.
+            val userServiceCode = runCatching {
+                tetheringServiceSetTethering(type, enable)
+            }.getOrElse { error ->
+                android.util.Log.w("ShizukuManager", "Tethering user service call failed", error)
+                null
+            }
+            if (userServiceCode != null &&
+                userServiceCode != TetheringShizukuService.ERR_UNAVAILABLE
+            ) {
+                // Authoritative answer from the platform path.
+                return@withContext if (userServiceCode == TetheringShizukuService.TETHER_ERROR_NO_ERROR) {
+                    Result.success(true)
+                } else {
+                    Result.failure(
+                        IllegalStateException(
+                            "TetheringManager rejected $kind enable=$enable (code $userServiceCode)"
+                        )
+                    )
+                }
+            }
+            // userServiceCode == null (service unreachable) or ERR_UNAVAILABLE
+            // (service-side infra failure): try the shell fallbacks below.
+
+            // Plan B: exec fallbacks.
+            val commands = when (kind) {
+                "usb" -> if (enable) {
+                    listOf("svc usb setFunctions rndis || svc usb setFunctions ncm")
+                } else {
+                    // Blank function list = charging-only: tears down rndis/ncm.
+                    listOf("svc usb setFunctions")
+                }
+                "wifi" -> if (enable) {
+                    emptyList()
+                } else {
+                    listOf("cmd wifi stop-softap")
+                }
+                else -> emptyList()
+            }
+            if (commands.isEmpty()) {
+                return@withContext Result.failure(
+                    IllegalStateException(
+                        "No tethering mechanism available for $kind (user service unreachable)"
+                    )
+                )
+            }
+            runShizukuCommands(commands).map { true }
         }
+
+    /**
+     * Dispatches setTethering through the bound user service.
+     *
+     * @return the platform/service result code, or null when the service
+     *         could not be reached at all (caller falls back to exec).
+     */
+    private suspend fun tetheringServiceSetTethering(type: Int, enable: Boolean): Int? {
+        val binder = tetheringServiceBinder() ?: return null
+        val service = try {
+            ITetheringUserService.Stub.asInterface(binder)
+        } catch (t: Throwable) {
+            tetheringServiceBinder = null
+            return null
+        }
+        return try {
+            service.setTethering(type, enable)
+        } catch (t: Throwable) {
+            // DeadObject: the user service process was killed between calls.
+            // Drop the cached binder so the next toggle rebinds fresh.
+            android.util.Log.w("ShizukuManager", "Tethering user service binder dead", t)
+            tetheringServiceBinder = null
+            null
+        }
+    }
+
+    /**
+     * Binds Smart Island's Shizuku user service once and caches its binder.
+     * The service class runs inside the Shizuku server process; the version
+     * in [UserServiceArgs] makes Shizuku restart it whenever the app updates
+     * the class.
+     */
+    private suspend fun tetheringServiceBinder(): IBinder? {
+        tetheringServiceBinder?.let { return it }
+        val bound = withTimeoutOrNull(USER_SERVICE_BIND_TIMEOUT_MS) {
+            suspendCancellableCoroutine { continuation ->
+                val connection = object : ServiceConnection {
+                    override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+                        if (service != null && continuation.isActive) {
+                            tetheringServiceBinder = service
+                            continuation.resume(service)
+                        }
+                    }
+
+                    override fun onServiceDisconnected(name: ComponentName?) {
+                        // The user service process died; force a rebind next time.
+                        tetheringServiceBinder = null
+                    }
+                }
+                tetheringServiceConnection = connection
+                val args = Shizuku.UserServiceArgs(
+                    ComponentName(BuildConfig.APPLICATION_ID, TetheringShizukuService::class.java.getName())
+                )
+                    .processNameSuffix("tethering")
+                    // Stable tag: the service identity must survive R8 renaming
+                    // in release builds (the server keys the service by tag).
+                    .tag("tethering")
+                    .version(USER_SERVICE_VERSION)
+                try {
+                    Shizuku.bindUserService(args, connection)
+                } catch (t: Throwable) {
+                    if (continuation.isActive) {
+                        continuation.resumeWithException(t)
+                    }
+                }
+            }
+        }
+        return bound
+    }
 
     /** Valid [toggleTethering] kinds, mirroring the shell command's types. */
     val TETHERING_KINDS = setOf("wifi", "usb", "bluetooth")
+
+    /** kinds → TetheringManager.TETHERING_* types (stable since API 30). */
+    private val TETHERING_TYPES = mapOf(
+        "wifi" to TetheringShizukuService.TETHERING_WIFI,
+        "usb" to TetheringShizukuService.TETHERING_USB,
+        "bluetooth" to TetheringShizukuService.TETHERING_BLUETOOTH
+    )
+
+    /** Cached user-service binder; null until first bind / after death. */
+    @Volatile
+    private var tetheringServiceBinder: IBinder? = null
+
+    /** Connection kept alive for the cached binder (passive afterwards). */
+    private var tetheringServiceConnection: ServiceConnection? = null
+
+    /** Bump whenever [TetheringShizukuService] changes shape. */
+    private const val USER_SERVICE_VERSION = 1
+    private const val USER_SERVICE_BIND_TIMEOUT_MS = 6000L
 }

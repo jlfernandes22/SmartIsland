@@ -886,7 +886,11 @@ class SmartIslandOverlayService : AccessibilityService() {
         val sidePaddingPx = 16f * density
         val leftExtentPx = mainWidthPx / 2f - xOffsetPx
         val rightExtentPx = mainWidthPx / 2f + companionExtraPx + xOffsetPx
-        return (2f * (maxOf(leftExtentPx, rightExtentPx) + sidePaddingPx)).toInt()
+        // Floor the half-extent BEFORE doubling: the window width is then
+        // always EVEN, so the CENTER_HORIZONTAL gravity centers it on an exact
+        // integer pixel. An odd width would park the window on a half pixel
+        // and let WindowManager's rounding disagree with Compose's by 1px.
+        return 2 * (maxOf(leftExtentPx, rightExtentPx) + sidePaddingPx).toInt()
     }
 
     private fun removeCollapsedWindow() {
@@ -1121,11 +1125,14 @@ class SmartIslandOverlayService : AccessibilityService() {
 
     /**
      * Idle-menu tethering toggles (Wi-Fi hotspot, USB tethering, Bluetooth
-     * tethering), same spirit as the Bluetooth row: Shizuku shell command, no
-     * dialogs, no settings pages — the island stays visible and the menu stays
-     * open either way. Best-effort: when a state reader is unavailable the
-     * dispatch result is trusted; when the command fails the user gets in-menu
-     * feedback instead of a Toast or a Settings round-trip.
+     * tethering), same spirit as the Bluetooth row: TetheringManager through
+     * the Shizuku user service (shell uid holds TETHER_PRIVILEGED) with exec
+     * fallbacks — no dialogs, no settings pages — the island stays visible
+     * and the menu stays open either way. Best-effort: when a state reader is
+     * unavailable the dispatch result is trusted (it is authoritative — the
+     * platform answers through StartTetheringCallback); when the dispatch
+     * fails the user gets in-menu feedback instead of a Toast or a Settings
+     * round-trip.
      */
     private fun toggleTetheringViaShizuku(kind: String, label: String) {
         // Keep the island fully visible; make its window transparent to touches
@@ -1615,7 +1622,15 @@ class SmartIslandOverlayService : AccessibilityService() {
         private const val WINDOWING_MODE_FREEFORM = 5
         private const val OVERLAY_CHANNEL_ID = "smart_island_overlay"
         private const val OVERLAY_CHANNEL_NAME = "Smart Island overlay"
-        private const val AUTO_COLLAPSE_DELAY_MS = 220L
+        // The expanded→collapsed window resize must land AFTER the Compose
+        // collapse springs have settled (stiffness 520, damping 0.72-0.76 →
+        // ~98% settled at ~250ms, plus jank headroom). Resizing while the pill
+        // is still morphing lets the new narrow window CLIP a mid-flight pill
+        // on a stalled frame — a visible pop that reads as the collapsed
+        // island shaking. 480ms is past the spring settle point with margin;
+        // until then the content-sized expanded window just keeps clipping
+        // nothing, and collapseJob is cancelled by a re-expand as before.
+        private const val AUTO_COLLAPSE_DELAY_MS = 480L
         // How long a tethering toggle waits for the system state to confirm
         // before falling back to the (optimistic) dispatch result.
         private const val TETHERING_TOGGLE_VERIFY_TIMEOUT_MS = 4000L
@@ -1630,10 +1645,14 @@ class SmartIslandOverlayService : AccessibilityService() {
      */
     private fun isNotificationShadeWindow(event: AccessibilityEvent): Boolean {
         val className = event.className?.toString() ?: ""
-        if (className.contains("NotificationShade") ||
-            className.contains("statusbar") ||
-            className.contains("StatusBar")
-        ) {
+        // ONLY the shade window itself counts as "shade open". The plain
+        // status-bar window (class ...StatusBar...) exists at ALL times, so
+        // matching it made every status-bar window-state event flip
+        // isShadeOpen true — the island then hid (hideWhenShadeOpen) until the
+        // next windows-changed pass corrected it and replayed the reappear
+        // scale-in: a recurring shrink-and-bounce that reads as the collapsed
+        // island jittering whenever SystemUI churns (music, clocks, ...).
+        if (className.contains("NotificationShade")) {
             return true
         }
         val source = event.source
