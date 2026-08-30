@@ -49,7 +49,21 @@ data class SmartIslandSettings(
     val deviceType: String = "AUTO",
     val allowNetworkChecks: Boolean = true,
     val enableNotificationHistory: Boolean = false,
-    val notificationHistoryRetentionHours: Int = 72
+    val notificationHistoryRetentionHours: Int = 72,
+    val useCutoutSizeWhenIdle: Boolean = false,
+    val idleWidth: Float = 112f,
+    val idleHeight: Float = 34f,
+    val idleSizeAutoDetected: Boolean = false,
+    val hideWhenShadeOpen: Boolean = true,
+    val swipeUpAction: String = "DISMISS",
+    val holdSwipeUpAction: String = "DISMISS",
+    val swipeDownAction: String = "FLOATING_WINDOW",
+    val tapAction: String = "TOGGLE",
+    val idleTapMode: String = "APPS",
+    val idleInfoShowTime: Boolean = true,
+    val idleInfoShowBattery: Boolean = true,
+    val idleInfoShowBluetooth: Boolean = true,
+    val idleInfoShowHotspot: Boolean = true
 ) {
     companion object {
         val Default = SmartIslandSettings()
@@ -66,5 +80,36 @@ data class SmartIslandSettings(
         const val MAX_CORNER_RADIUS = 40f
         const val MIN_OPACITY = 0.2f
         const val MAX_OPACITY = 1f
+        const val MIN_IDLE_WIDTH = 20f
+        const val MIN_IDLE_HEIGHT = 24f
+    }
+
+    object GestureActions {
+        const val DISMISS = "DISMISS"
+        const val DISMISS_ALL = "DISMISS_ALL"
+        const val COLLAPSE = "COLLAPSE"
+        const val FLOATING_WINDOW = "FLOATING_WINDOW"
+        const val TOGGLE = "TOGGLE"
+        const val NONE = "NONE"
+
+        val SWIPE_UP_OPTIONS = listOf(DISMISS, COLLAPSE, NONE)
+        val HOLD_SWIPE_UP_OPTIONS = listOf(DISMISS_ALL, DISMISS, COLLAPSE, NONE)
+        val SWIPE_DOWN_OPTIONS = listOf(FLOATING_WINDOW, COLLAPSE, NONE)
+        val TAP_OPTIONS = listOf(TOGGLE, NONE)
+
+        val VALID_VALUES = setOf(
+            DISMISS, DISMISS_ALL, COLLAPSE, FLOATING_WINDOW, TOGGLE, NONE
+        )
+
+        fun isValid(value: String): Boolean = value in VALID_VALUES
+    }
+
+    object IdleTapModes {
+        const val APPS = "APPS"
+        const val INFO = "INFO"
+
+        val VALID_VALUES = setOf(APPS, INFO)
+
+        fun isValid(value: String): Boolean = value in VALID_VALUES
     }
 }

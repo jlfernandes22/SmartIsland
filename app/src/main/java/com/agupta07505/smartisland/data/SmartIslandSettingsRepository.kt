@@ -79,6 +79,20 @@ class SmartIslandSettingsRepository(private val context: Context) {
         val AllowNetworkChecks = booleanPreferencesKey("allow_network_checks")
         val EnableNotificationHistory = booleanPreferencesKey("enable_notification_history")
         val NotificationHistoryRetentionHours = intPreferencesKey("notification_history_retention_hours")
+        val UseCutoutSizeWhenIdle = booleanPreferencesKey("use_cutout_size_when_idle")
+        val IdleWidth = floatPreferencesKey("idle_width")
+        val IdleHeight = floatPreferencesKey("idle_height")
+        val IdleSizeAutoDetected = booleanPreferencesKey("idle_size_auto_detected")
+        val HideWhenShadeOpen = booleanPreferencesKey("hide_when_shade_open")
+        val SwipeUpAction = stringPreferencesKey("swipe_up_action")
+        val HoldSwipeUpAction = stringPreferencesKey("hold_swipe_up_action")
+        val SwipeDownAction = stringPreferencesKey("swipe_down_action")
+        val TapAction = stringPreferencesKey("tap_action")
+        val IdleTapMode = stringPreferencesKey("idle_tap_mode")
+        val IdleInfoShowTime = booleanPreferencesKey("idle_info_show_time")
+        val IdleInfoShowBattery = booleanPreferencesKey("idle_info_show_battery")
+        val IdleInfoShowBluetooth = booleanPreferencesKey("idle_info_show_bluetooth")
+        val IdleInfoShowHotspot = booleanPreferencesKey("idle_info_show_hotspot")
     }
 
     val settings: Flow<SmartIslandSettings> = context.smartIslandDataStore.data
@@ -189,7 +203,41 @@ class SmartIslandSettingsRepository(private val context: Context) {
                 deviceType = prefs[Keys.DeviceType] ?: defaults.deviceType,
                 allowNetworkChecks = prefs[Keys.AllowNetworkChecks] ?: defaults.allowNetworkChecks,
                 enableNotificationHistory = prefs[Keys.EnableNotificationHistory] ?: defaults.enableNotificationHistory,
-                notificationHistoryRetentionHours = prefs[Keys.NotificationHistoryRetentionHours] ?: defaults.notificationHistoryRetentionHours
+                notificationHistoryRetentionHours = prefs[Keys.NotificationHistoryRetentionHours] ?: defaults.notificationHistoryRetentionHours,
+                useCutoutSizeWhenIdle = prefs[Keys.UseCutoutSizeWhenIdle] ?: defaults.useCutoutSizeWhenIdle,
+                idleWidth = validDimension(
+                    prefs[Keys.IdleWidth],
+                    defaults.idleWidth,
+                    SmartIslandSettings.MIN_IDLE_WIDTH,
+                    SmartIslandSettings.MAX_WIDTH
+                ),
+                idleHeight = validDimension(
+                    prefs[Keys.IdleHeight],
+                    defaults.idleHeight,
+                    SmartIslandSettings.MIN_IDLE_HEIGHT,
+                    SmartIslandSettings.MAX_HEIGHT
+                ),
+                idleSizeAutoDetected = prefs[Keys.IdleSizeAutoDetected] ?: defaults.idleSizeAutoDetected,
+                hideWhenShadeOpen = prefs[Keys.HideWhenShadeOpen] ?: defaults.hideWhenShadeOpen,
+                swipeUpAction = prefs[Keys.SwipeUpAction]
+                    ?.takeIf { SmartIslandSettings.GestureActions.isValid(it) }
+                    ?: defaults.swipeUpAction,
+                holdSwipeUpAction = prefs[Keys.HoldSwipeUpAction]
+                    ?.takeIf { SmartIslandSettings.GestureActions.isValid(it) }
+                    ?: defaults.holdSwipeUpAction,
+                swipeDownAction = prefs[Keys.SwipeDownAction]
+                    ?.takeIf { SmartIslandSettings.GestureActions.isValid(it) }
+                    ?: defaults.swipeDownAction,
+                tapAction = prefs[Keys.TapAction]
+                    ?.takeIf { SmartIslandSettings.GestureActions.isValid(it) }
+                    ?: defaults.tapAction,
+                idleTapMode = prefs[Keys.IdleTapMode]
+                    ?.takeIf { SmartIslandSettings.IdleTapModes.isValid(it) }
+                    ?: defaults.idleTapMode,
+                idleInfoShowTime = prefs[Keys.IdleInfoShowTime] ?: defaults.idleInfoShowTime,
+                idleInfoShowBattery = prefs[Keys.IdleInfoShowBattery] ?: defaults.idleInfoShowBattery,
+                idleInfoShowBluetooth = prefs[Keys.IdleInfoShowBluetooth] ?: defaults.idleInfoShowBluetooth,
+                idleInfoShowHotspot = prefs[Keys.IdleInfoShowHotspot] ?: defaults.idleInfoShowHotspot
             )
         }
 
@@ -379,6 +427,64 @@ class SmartIslandSettingsRepository(private val context: Context) {
     }
     suspend fun setNotificationHistoryRetentionHours(value: Int) = editSafely {
         it[Keys.NotificationHistoryRetentionHours] = value
+    }
+    suspend fun setUseCutoutSizeWhenIdle(value: Boolean) = editSafely {
+        it[Keys.UseCutoutSizeWhenIdle] = value
+        if (!value) {
+            it[Keys.IdleSizeAutoDetected] = false
+        }
+    }
+    suspend fun setIdleSize(width: Float, height: Float) = editSafely {
+        it[Keys.IdleWidth] = validDimension(
+            width,
+            SmartIslandSettings.Default.idleWidth,
+            SmartIslandSettings.MIN_IDLE_WIDTH,
+            SmartIslandSettings.MAX_WIDTH
+        )
+        it[Keys.IdleHeight] = validDimension(
+            height,
+            SmartIslandSettings.Default.idleHeight,
+            SmartIslandSettings.MIN_IDLE_HEIGHT,
+            SmartIslandSettings.MAX_HEIGHT
+        )
+    }
+    suspend fun setIdleSizeAutoDetected(value: Boolean) = editSafely {
+        it[Keys.IdleSizeAutoDetected] = value
+    }
+    suspend fun setHideWhenShadeOpen(value: Boolean) = editSafely {
+        it[Keys.HideWhenShadeOpen] = value
+    }
+    suspend fun setSwipeUpAction(value: String) = editSafely {
+        it[Keys.SwipeUpAction] = value.takeIf { v -> SmartIslandSettings.GestureActions.isValid(v) }
+            ?: SmartIslandSettings.Default.swipeUpAction
+    }
+    suspend fun setHoldSwipeUpAction(value: String) = editSafely {
+        it[Keys.HoldSwipeUpAction] = value.takeIf { v -> SmartIslandSettings.GestureActions.isValid(v) }
+            ?: SmartIslandSettings.Default.holdSwipeUpAction
+    }
+    suspend fun setSwipeDownAction(value: String) = editSafely {
+        it[Keys.SwipeDownAction] = value.takeIf { v -> SmartIslandSettings.GestureActions.isValid(v) }
+            ?: SmartIslandSettings.Default.swipeDownAction
+    }
+    suspend fun setTapAction(value: String) = editSafely {
+        it[Keys.TapAction] = value.takeIf { v -> SmartIslandSettings.GestureActions.isValid(v) }
+            ?: SmartIslandSettings.Default.tapAction
+    }
+    suspend fun setIdleTapMode(value: String) = editSafely {
+        it[Keys.IdleTapMode] = value.takeIf { v -> SmartIslandSettings.IdleTapModes.isValid(v) }
+            ?: SmartIslandSettings.Default.idleTapMode
+    }
+    suspend fun setIdleInfoShowTime(value: Boolean) = editSafely {
+        it[Keys.IdleInfoShowTime] = value
+    }
+    suspend fun setIdleInfoShowBattery(value: Boolean) = editSafely {
+        it[Keys.IdleInfoShowBattery] = value
+    }
+    suspend fun setIdleInfoShowBluetooth(value: Boolean) = editSafely {
+        it[Keys.IdleInfoShowBluetooth] = value
+    }
+    suspend fun setIdleInfoShowHotspot(value: Boolean) = editSafely {
+        it[Keys.IdleInfoShowHotspot] = value
     }
 
     suspend fun resetPosition() = editSafely {

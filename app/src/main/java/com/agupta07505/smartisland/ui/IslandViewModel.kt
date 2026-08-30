@@ -158,6 +158,11 @@ class IslandViewModel(
     private fun startAutoCollapseTimer() {
         autoCollapseJob?.cancel()
         if (isInputActive.value) return
+        // The battery charging card stays expanded indefinitely unless the user
+        // opted into the auto-hide inactivity timer. Alerts (low battery, saver)
+        // still auto-collapse as usual.
+        val activeNotification = visibleNotifications.value.getOrNull(selectedIndex.value)
+        if (activeNotification?.category == "battery_charging" && !settings.value.autoHidePill) return
         autoCollapseJob = viewModelScope.launch {
             delay(AUTO_COLLAPSE_DELAY_MS)
             collapse()

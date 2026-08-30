@@ -32,8 +32,10 @@ class CameraCutoutDetectorTest {
         // Center X = 540, Screen Center X = 540 -> xOffsetPx = 0 -> xOffsetDp = 0
         assertEquals(0f, result.xOffsetDp, 0.01f)
         assertEquals(0f, result.yOffsetDp, 0.01f)
-        // width = 100px / 2.75 + 24dp = ~60.36dp -> clamped to MIN_WIDTH 76dp
-        assertEquals(76f, result.widthDp, 0.01f)
+        // width = 100px / 2.75 + 6dp padding = ~42.36dp (no longer clamped to the content-pill minimum)
+        assertEquals(42.36f, result.widthDp, 0.01f)
+        // height = 80px / 2.75 + 10dp padding = ~39.09dp
+        assertEquals(39.09f, result.heightDp, 0.01f)
     }
 
     @Test

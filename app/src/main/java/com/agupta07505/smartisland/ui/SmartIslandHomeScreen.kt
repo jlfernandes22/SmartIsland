@@ -1345,7 +1345,7 @@ private fun DetailScreenHost(
                 CustomizationsSection(settings = settings, repository = repository)
             }
             FeatureDetailSection.GesturesGuide -> {
-                GesturesSection()
+                GesturesSection(settings = settings, repository = repository)
             }
             FeatureDetailSection.PermissionsCenter -> {
                 PermissionsSection(

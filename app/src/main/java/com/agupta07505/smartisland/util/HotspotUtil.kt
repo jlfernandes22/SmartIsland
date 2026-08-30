@@ -17,6 +17,24 @@ import android.provider.Settings
 import android.widget.Toast
 
 object HotspotUtil {
+
+    /**
+     * Best-effort live tethering state detection via the legacy WifiManager API.
+     * Returns true/false when readable, null when the platform blocks reflection
+     * (Android 13+ hidden API restrictions).
+     */
+    fun isHotspotActive(context: Context): Boolean? {
+        return runCatching {
+            val wifiManager = context.applicationContext
+                .getSystemService(Context.WIFI_SERVICE) as? android.net.wifi.WifiManager
+                ?: return null
+            val stateMethod = wifiManager.javaClass.getMethod("getWifiApState")
+            val state = stateMethod.invoke(wifiManager) as? Int ?: return null
+            // WIFI_AP_STATE_ENABLED = 13, WIFI_AP_STATE_ENABLING = 12
+            state == 13 || state == 12
+        }.getOrNull()
+    }
+
     fun parseDeviceCount(title: String?, text: String?): Int {
         val fullText = "${title.orEmpty()} ${text.orEmpty()}"
         val lower = fullText.lowercase()

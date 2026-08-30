@@ -83,6 +83,8 @@ fun PositionsSection(
     var localYOffset by remember(settings.yOffset) { mutableFloatStateOf(settings.yOffset) }
     var localCornerRadius by remember(settings.cornerRadius) { mutableFloatStateOf(settings.cornerRadius) }
     var localOpacity by remember(settings.opacity) { mutableFloatStateOf(settings.opacity) }
+    var localIdleWidth by remember(settings.idleWidth) { mutableFloatStateOf(settings.idleWidth) }
+    var localIdleHeight by remember(settings.idleHeight) { mutableFloatStateOf(settings.idleHeight) }
 
     // Dynamically calculate responsive notch coordinates for the current device screen
     val screenWidthDp = with(density) { windowInfo.containerSize.width.toDp().value }
@@ -258,7 +260,102 @@ fun PositionsSection(
             }
         }
 
-        // Card 2: Precision Dimensions & Offsets
+        // Card 2: Idle Pill Size (Camera Cutout Match)
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(20.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)),
+            elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = stringResource(R.string.idle_size_title),
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = stringResource(R.string.idle_size_desc),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    Switch(
+                        checked = settings.useCutoutSizeWhenIdle,
+                        onCheckedChange = { checked ->
+                            scope.launch { repository.setUseCutoutSizeWhenIdle(checked) }
+                        }
+                    )
+                }
+
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
+
+                OutlinedButton(
+                    onClick = {
+                        scope.launch {
+                            val detected = com.agupta07505.smartisland.util.CameraCutoutDetector.detectAsync(context)
+                            repository.setIdleSize(detected.widthDp, detected.heightDp)
+                            if (detected.hasHardwareCutout) {
+                                repository.setIdleSizeAutoDetected(true)
+                            }
+                            Toast.makeText(
+                                context,
+                                if (detected.hasHardwareCutout) {
+                                    context.getString(
+                                        R.string.toast_cutout_detected,
+                                        detected.widthDp.toInt(),
+                                        detected.heightDp.toInt()
+                                    )
+                                } else {
+                                    context.getString(R.string.toast_cutout_not_detected)
+                                },
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Icon(Icons.Rounded.CenterFocusStrong, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text(stringResource(R.string.btn_detect_cutout), fontWeight = FontWeight.SemiBold)
+                }
+
+                SliderSettingItem(
+                    label = stringResource(R.string.slider_idle_width),
+                    value = localIdleWidth,
+                    range = SmartIslandSettings.MIN_IDLE_WIDTH..SmartIslandSettings.MAX_WIDTH,
+                    onValueChange = { localIdleWidth = it },
+                    onValueChangeFinished = {
+                        scope.launch { repository.setIdleSize(localIdleWidth, localIdleHeight) }
+                    }
+                )
+                SliderSettingItem(
+                    label = stringResource(R.string.slider_idle_height),
+                    value = localIdleHeight,
+                    range = SmartIslandSettings.MIN_IDLE_HEIGHT..SmartIslandSettings.MAX_HEIGHT,
+                    onValueChange = { localIdleHeight = it },
+                    onValueChangeFinished = {
+                        scope.launch { repository.setIdleSize(localIdleWidth, localIdleHeight) }
+                    }
+                )
+            }
+        }
+
+        // Card 3: Precision Dimensions & Offsets
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(20.dp),

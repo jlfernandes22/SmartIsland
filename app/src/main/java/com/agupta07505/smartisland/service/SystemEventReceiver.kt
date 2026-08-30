@@ -105,8 +105,13 @@ class SystemEventReceiver(
 
     private fun isCharging(intent: Intent): Boolean {
         val status = intent.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
+        val plugged = intent.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0)
+        // Treat any plugged state as charging: some devices briefly report a
+        // DISCHARGING status while plugged in (e.g. at 100%), which previously
+        // caused the charging island to disappear and re-expand in a loop.
         return status == BatteryManager.BATTERY_STATUS_CHARGING ||
-               status == BatteryManager.BATTERY_STATUS_FULL
+            status == BatteryManager.BATTERY_STATUS_FULL ||
+            plugged != 0
     }
 
     private fun getBatteryIntent(context: Context, batteryIntent: Intent?): Intent? {

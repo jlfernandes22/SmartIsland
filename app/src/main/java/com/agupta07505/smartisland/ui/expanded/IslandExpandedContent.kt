@@ -23,16 +23,21 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Text
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
@@ -61,7 +66,9 @@ fun IslandExpandedContent(
     onHeightMeasured: (Dp) -> Unit,
     settings: SmartIslandSettings,
     modifier: Modifier = Modifier,
-    onReplyStateChanged: (Boolean) -> Unit = {}
+    onReplyStateChanged: (Boolean) -> Unit = {},
+    onOpenIdleInfoItem: (String) -> Unit = {},
+    onInfoPageActive: (Boolean) -> Unit = {}
 ) {
     if (notifications.isEmpty()) {
         val density = LocalDensity.current
@@ -72,18 +79,32 @@ fun IslandExpandedContent(
                 .onSizeChanged {
                     val measuredHeight = with(density) { it.height.toDp() }
                     if (measuredHeight > 0.dp) {
-                        val clamped = measuredHeight.coerceIn(80.dp, 180.dp)
+                        val clamped = measuredHeight.coerceIn(80.dp, 250.dp)
                         onHeightMeasured(clamped)
                     }
                 }
         ) {
-            EmptyExpanded(settings = settings, apps = launcherApps, onLaunchApp = onLaunchApp)
+            EmptyExpanded(
+                settings = settings,
+                apps = launcherApps,
+                onLaunchApp = onLaunchApp,
+                onOpenIdleInfoItem = onOpenIdleInfoItem
+            )
         }
         return
     }
 
     val density = LocalDensity.current
     var pageHeights by remember { mutableStateOf(emptyMap<String, Dp>()) }
+
+    // When the idle tap mode is "Info Menu", an extra info page is prepended to the
+    // pager so the info menu stays reachable even while notifications are active.
+    val showInfoPage = settings.idleTapMode == com.agupta07505.smartisland.data.SmartIslandSettings.IdleTapModes.INFO
+    val infoPageIndex = 0
+    val pagerOffset = if (showInfoPage) 1 else 0
+    val pageCount = notifications.size + pagerOffset
+    var infoPageHeight by remember { mutableStateOf<Dp?>(null) }
+    val scope = rememberCoroutineScope()
 
     // Clean up stale keys not present in notifications
     val activeKeys = remember(notifications) { notifications.map { it.key }.toSet() }
@@ -92,36 +113,56 @@ fun IslandExpandedContent(
     }
 
     val pagerState = rememberPagerState(
-        initialPage = selectedIndex.coerceIn(0, notifications.lastIndex),
-        pageCount = { notifications.size }
+        initialPage = (selectedIndex.coerceIn(0, notifications.lastIndex)) + pagerOffset,
+        pageCount = { pageCount }
     )
 
-    // Sync external selectedIndex updates ONLY when not currently user-scrolling,
-    // preventing gesture interrupts mid-swipe that cause half-page frozen states.
+    // Tracks the page the pager itself last settled on. When a selectedIndex change
+    // matches it, the change is just the pager reporting its own scroll (user swipe)
+    // and must not be re-animated; any other change (bubble tap, auto-expand) is an
+    // external selection that wins and animates the pager into place.
+    var lastPagerSettledIndex by remember { mutableStateOf(-1) }
+
     LaunchedEffect(selectedIndex) {
-        if (selectedIndex in notifications.indices &&
-            !pagerState.isScrollInProgress &&
-            pagerState.currentPage != selectedIndex
+        val targetPage = selectedIndex.coerceIn(0, notifications.lastIndex) + pagerOffset
+        if (targetPage in 0 until pageCount &&
+            pagerState.currentPage != targetPage &&
+            targetPage != lastPagerSettledIndex
         ) {
-            pagerState.animateScrollToPage(selectedIndex)
+            pagerState.animateScrollToPage(targetPage)
         }
     }
 
-    // Sync settled page updates back to caller ONLY when scroll has settled
+    // Sync settled page updates back to caller ONLY when scroll has settled.
+    // The info page (page 0) does not map to a notification.
     LaunchedEffect(pagerState.settledPage) {
-        if (pagerState.settledPage in notifications.indices) {
-            onPageSelected(pagerState.settledPage)
+        val settled = pagerState.settledPage
+        if (settled in 0 until pageCount) {
+            lastPagerSettledIndex = settled
+            val notificationIndex = settled - pagerOffset
+            if (notificationIndex in notifications.indices) {
+                onPageSelected(notificationIndex)
+            }
         }
     }
 
     // Safety net: Ensure pager never stays stuck at a non-zero offset fraction when scroll finishes
     LaunchedEffect(pagerState.isScrollInProgress) {
         if (!pagerState.isScrollInProgress && pagerState.currentPageOffsetFraction != 0f) {
-            val targetPage = pagerState.settledPage.coerceIn(0, (notifications.size - 1).coerceAtLeast(0))
-            if (targetPage in notifications.indices) {
+            val targetPage = pagerState.settledPage.coerceIn(0, (pageCount - 1).coerceAtLeast(0))
+            if (targetPage in 0 until pageCount) {
                 pagerState.animateScrollToPage(targetPage)
             }
         }
+    }
+
+    // Tell the caller whether the info menu page is the one being displayed,
+    // so overlay taps on it don't open the selected notification's app.
+    LaunchedEffect(pagerState.currentPage) {
+        onInfoPageActive(showInfoPage && pagerState.currentPage == infoPageIndex)
+    }
+    LaunchedEffect(Unit) {
+        onInfoPageActive(showInfoPage && pagerState.currentPage == infoPageIndex)
     }
 
     val bottomPadding = 16.dp
@@ -133,7 +174,6 @@ fun IslandExpandedContent(
         // glitch where battery/call expand more (taller) than other modes.
         val currentPage = pagerState.currentPage
         val offsetFraction = pagerState.currentPageOffsetFraction
-        val currentNotification = notifications.getOrNull(currentPage)
 
         fun clampHeightForMode(notif: IslandNotification?, height: Dp): Dp {
             return when (notif?.mode) {
@@ -153,24 +193,29 @@ fun IslandExpandedContent(
             }
         }
 
-        val currentPageHeightRaw = currentNotification?.let { pageHeights[it.key] }
-        val currentPageHeight = currentPageHeightRaw?.let { clampHeightForMode(currentNotification, it) }
-            ?: com.agupta07505.smartisland.ui.defaultEstimatedHeightForMode(currentNotification?.mode)
+        fun pageHeightFor(page: Int): Dp {
+            if (showInfoPage && page == infoPageIndex) {
+                return infoPageHeight?.coerceIn(80.dp, 250.dp)
+                    ?: com.agupta07505.smartisland.ui.defaultEstimatedHeightForMode(null)
+            }
+            val notification = notifications.getOrNull(page - pagerOffset) ?: return 135.dp
+            val raw = pageHeights[notification.key]
+            return raw?.let { clampHeightForMode(notification, it) }
+                ?: com.agupta07505.smartisland.ui.defaultEstimatedHeightForMode(notification.mode)
+        }
 
+        val currentPageHeight = pageHeightFor(currentPage)
         val targetHeight = run {
             val nextPage = if (offsetFraction > 0f) {
-                (currentPage + 1).coerceAtMost(notifications.lastIndex)
+                (currentPage + 1).coerceAtMost(pageCount - 1)
             } else if (offsetFraction < 0f) {
                 (currentPage - 1).coerceAtLeast(0)
             } else {
                 currentPage
             }
-            val nextNotification = notifications.getOrNull(nextPage)
-            val nextHeightRaw = nextNotification?.let { pageHeights[it.key] }
-            val nextHeight = (nextHeightRaw?.let { clampHeightForMode(nextNotification, it) }
-                ?: com.agupta07505.smartisland.ui.defaultEstimatedHeightForMode(nextNotification?.mode))
+            val nextHeight = pageHeightFor(nextPage)
             val fraction = kotlin.math.abs(offsetFraction)
-            (currentPageHeight + (nextHeight - currentPageHeight) * fraction).coerceIn(72.dp, 205.dp)
+            (currentPageHeight + (nextHeight - currentPageHeight) * fraction).coerceIn(72.dp, 250.dp)
         }
 
         LaunchedEffect(targetHeight) {
@@ -189,8 +234,23 @@ fun IslandExpandedContent(
                     // unbounded = true: pages measure at natural height even when parent Box has explicit height
                     .wrapContentHeight(unbounded = true)
             ) { page ->
-                val notification = notifications.getOrNull(page)
-                if (notification != null) {
+                if (showInfoPage && page == infoPageIndex) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .wrapContentHeight()
+                            .onSizeChanged { size ->
+                                val heightDp = with(density) { size.height.toDp() }
+                                if (infoPageHeight != heightDp) {
+                                    infoPageHeight = heightDp
+                                }
+                            }
+                    ) {
+                        IdleInfoExpanded(settings = settings, onItemClick = onOpenIdleInfoItem)
+                    }
+                } else {
+                    val notification = notifications.getOrNull(page - pagerOffset)
+                    if (notification != null) {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -297,9 +357,45 @@ fun IslandExpandedContent(
                             IslandMode.Empty -> EmptyExpanded(
                                 settings = settings,
                                 apps = launcherApps,
-                                onLaunchApp = onLaunchApp
+                                onLaunchApp = onLaunchApp,
+                                onOpenIdleInfoItem = onOpenIdleInfoItem
                             )
                         }
+                    }
+                }
+            }
+            }
+
+            // Notification count dots at the bottom of the expanded card:
+            // one dot per page (info menu page first when enabled), the current one highlighted.
+            if (pageCount > 1) {
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    (0 until pageCount).forEach { index ->
+                        val isActive = index == pagerState.currentPage
+                        Box(
+                            modifier = Modifier
+                                .size(if (isActive) 7.dp else 5.dp)
+                                .clip(CircleShape)
+                                .background(
+                                    if (isActive) Color.White else Color.White.copy(alpha = 0.35f)
+                                )
+                                .clickable(
+                                    interactionSource = remember { MutableInteractionSource() },
+                                    indication = null
+                                ) {
+                                    if (showInfoPage && index == infoPageIndex) {
+                                        scope.launch { pagerState.animateScrollToPage(infoPageIndex) }
+                                    } else {
+                                        onPageSelected(index - pagerOffset)
+                                    }
+                                }
+                        )
                     }
                 }
             }
@@ -311,8 +407,14 @@ fun IslandExpandedContent(
 private fun EmptyExpanded(
     settings: SmartIslandSettings,
     apps: List<LaunchableApp>?,
-    onLaunchApp: (String) -> Unit
+    onLaunchApp: (String) -> Unit,
+    onOpenIdleInfoItem: (String) -> Unit
 ) {
+    if (settings.idleTapMode == com.agupta07505.smartisland.data.SmartIslandSettings.IdleTapModes.INFO) {
+        IdleInfoExpanded(settings = settings, onItemClick = onOpenIdleInfoItem)
+        return
+    }
+
     val context = LocalContext.current
     Column(
         modifier = Modifier

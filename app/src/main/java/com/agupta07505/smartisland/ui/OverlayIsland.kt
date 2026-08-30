@@ -28,7 +28,8 @@ fun OverlayIsland(
     onLaunchApp: (String) -> Unit,
     onOpenFloatingWindow: () -> Unit,
     modifier: Modifier = Modifier,
-    isFullWidth: Boolean = true
+    isFullWidth: Boolean = true,
+    onOpenIdleInfoItem: (String) -> Unit = {}
 ) {
     val settings by viewModel.settings.collectAsState()
     val expanded by viewModel.expanded.collectAsState()
@@ -96,6 +97,7 @@ fun OverlayIsland(
         isInputActive = isInputActive,
         onReplyStateChanged = { viewModel.setInputActive(it) },
         isFullWidth = isFullWidth,
+        onOpenIdleInfoItem = onOpenIdleInfoItem,
         modifier = modifier
     )
 }

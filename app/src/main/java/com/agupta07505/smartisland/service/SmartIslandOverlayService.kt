@@ -21,6 +21,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.graphics.PixelFormat
 import android.os.Build
+import android.os.Bundle
 import android.provider.Settings
 import android.view.Gravity
 import android.view.WindowManager
@@ -50,6 +51,7 @@ import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -72,6 +74,10 @@ class SmartIslandOverlayService : AccessibilityService() {
     private var isTouchableRegionSupported = false
     @Volatile private var destroyed = false
     private var isWindowExpanded: Boolean = false
+    private var isShadeOpen: Boolean = false
+    // While true, the "hide when shade open" rule is suspended so the island
+    // stays visible during in-menu toggles (e.g. the Bluetooth QS tile tap).
+    @Volatile private var suppressShadeHide: Boolean = false
     private var collapseJob: kotlinx.coroutines.Job? = null
     private var lastParams: WindowManager.LayoutParams? = null
 
@@ -118,6 +124,7 @@ class SmartIslandOverlayService : AccessibilityService() {
                     Intent.ACTION_SCREEN_ON -> {
                         overlayOwners.resume()
                         isLockScreenActive = keyguardManager?.isKeyguardLocked == true
+                        isShadeOpen = false
                         updateWindowLayoutParams(
                             isWindowExpanded,
                             viewModel.settings.value
@@ -126,6 +133,7 @@ class SmartIslandOverlayService : AccessibilityService() {
                     Intent.ACTION_SCREEN_OFF -> {
                         overlayOwners.pause()
                         isLockScreenActive = true
+                        isShadeOpen = false
                         updateWindowLayoutParams(
                             isWindowExpanded,
                             viewModel.settings.value
@@ -158,17 +166,49 @@ class SmartIslandOverlayService : AccessibilityService() {
 
             if (event?.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
                 val openedPackage = event.packageName?.toString()
+                val openedClass = event.className?.toString() ?: ""
+                val shadeToggled = if (openedPackage == "com.android.systemui") {
+                    isShadeOpen = isNotificationShadeWindow(event)
+                    true
+                } else if (!openedPackage.isNullOrEmpty() && openedPackage != packageName) {
+                    if (isShadeOpen) {
+                        isShadeOpen = false
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+                if (shadeToggled) {
+                    android.util.Log.d(TAG, "Shade state changed: isShadeOpen=$isShadeOpen")
+                    updateWindowLayoutParams(isWindowExpanded, viewModel.settings.value)
+                }
+
                 if (!openedPackage.isNullOrEmpty() &&
                     openedPackage != packageName &&
                     openedPackage != "com.android.systemui"
                 ) {
                     viewModel.foregroundPackage.value = openedPackage
-                    val hasNonMusicNotifications = notificationRepository.notifications.value.any {
-                        it.packageName == openedPackage && it.mode != com.agupta07505.smartisland.model.IslandMode.Music
+                    // Only clear plain chat/app notifications when their app is opened.
+                    // System status islands (Hotspot, Battery, Flashlight, Screen
+                    // Recording, ...) must survive even when e.g. Settings is opened,
+                    // otherwise the hotspot card disappears while expanded.
+                    val hasPlainNotifications = notificationRepository.notifications.value.any {
+                        it.packageName == openedPackage && it.mode == com.agupta07505.smartisland.model.IslandMode.Notification
                     }
-                    if (hasNonMusicNotifications) {
+                    if (hasPlainNotifications) {
                         notificationRepository.removeNotificationsForPackage(openedPackage)
                     }
+                }
+            }
+
+            if (event?.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED) {
+                // Fallback: some ROMs report the shade via windows-changed events only.
+                val shadeNow = detectShadeFromWindows()
+                if (shadeNow != isShadeOpen) {
+                    isShadeOpen = shadeNow
+                    updateWindowLayoutParams(isWindowExpanded, viewModel.settings.value)
                 }
             }
         }
@@ -273,6 +313,29 @@ class SmartIslandOverlayService : AccessibilityService() {
                         stopOverlaySession()
                     } else {
                         startOverlaySession(settings)
+                    }
+                }
+            }
+        }
+
+        serviceScope.launch {
+            runSuspendCatchingLogged(TAG, "Idle cutout auto-detect collector failed") {
+                repository.settings.collect { settings ->
+                    if (destroyed) return@collect
+                    if (!settings.enabled || !settings.useCutoutSizeWhenIdle || settings.idleSizeAutoDetected) {
+                        return@collect
+                    }
+                    val detected = com.agupta07505.smartisland.util.CameraCutoutDetector.detectAsync(this@SmartIslandOverlayService)
+                    if (detected.hasHardwareCutout) {
+                        repository.setIdleSize(detected.widthDp, detected.heightDp)
+                        repository.setIdleSizeAutoDetected(true)
+                        if (::viewModel.isInitialized) {
+                            updateWindowLayoutParams(isWindowExpanded, viewModel.settings.value)
+                        }
+                        android.util.Log.d(
+                            TAG,
+                            "Idle cutout auto-detected: ${detected.widthDp}x${detected.heightDp}dp"
+                        )
                     }
                 }
             }
@@ -442,7 +505,9 @@ class SmartIslandOverlayService : AccessibilityService() {
                 val isLocked = keyguardManager?.isKeyguardLocked == true
                 isLockScreenActive = isLocked
                 val isLandscape = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
-                val isHidden = (!viewModel.settings.value.showOnLockScreen && isLocked) || (isLandscape && !viewModel.settings.value.showInLandscape)
+                val isHidden = (!viewModel.settings.value.showOnLockScreen && isLocked) ||
+                    (isLandscape && !viewModel.settings.value.showInLandscape) ||
+                    (viewModel.settings.value.hideWhenShadeOpen && isShadeOpen && !suppressShadeHide)
                 visibility = if (isHidden) android.view.View.GONE else android.view.View.VISIBLE
 
                 installOverlayViewTreeOwners()
@@ -456,7 +521,8 @@ class SmartIslandOverlayService : AccessibilityService() {
                         onOpenNotification = { notification -> openNotification(notification) },
                         onLaunchApp = { packageName -> launchApp(packageName) },
                         onOpenFloatingWindow = { openCurrentNotificationInFloatingWindow() },
-                        isFullWidth = isTouchableRegionSupported
+                        isFullWidth = isTouchableRegionSupported,
+                        onOpenIdleInfoItem = { item -> openIdleInfoItem(item) }
                     )
                 }
 
@@ -600,7 +666,9 @@ class SmartIslandOverlayService : AccessibilityService() {
         viewModel.isLocked.value = isLocked
         
         val isLandscape = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
-        val isHidden = (!settings.showOnLockScreen && isLocked) || (isLandscape && !settings.showInLandscape)
+        val isHidden = (!settings.showOnLockScreen && isLocked) ||
+            (isLandscape && !settings.showInLandscape) ||
+            (settings.hideWhenShadeOpen && isShadeOpen && !suppressShadeHide)
 
         val targetVisibility = if (isHidden) android.view.View.GONE else android.view.View.VISIBLE
         if (view.visibility != targetVisibility) {
@@ -636,7 +704,8 @@ class SmartIslandOverlayService : AccessibilityService() {
             WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
             WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
             WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-            WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED
+            WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED or
+            (if (suppressShadeHide) WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE else 0)
 
         val currentX = if (expanded || isTouchableRegionSupported) 0 else windowXPx
         val currentY = settings.yOffset.dpToPx()
@@ -737,8 +806,9 @@ class SmartIslandOverlayService : AccessibilityService() {
     }
 
     private fun openNotification(notification: IslandNotification) {
+        val zoomOptions = buildZoomLaunchOptions(viewModel.settings.value)
         if (notification.contentIntent != null) {
-            sendIntentWithOptions(this, notification.contentIntent)
+            sendIntentWithOptions(this, notification.contentIntent, zoomOptions)
         } else {
             runCatchingLogged(TAG, "Failed to launch package activity") {
                 when (notification.mode) {
@@ -746,26 +816,26 @@ class SmartIslandOverlayService : AccessibilityService() {
                         val intent = Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS).apply {
                             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                         }
-                        startActivity(intent)
+                        startActivity(intent, zoomOptions)
                     }
                     com.agupta07505.smartisland.model.IslandMode.Battery -> {
                         val intent = Intent(Intent.ACTION_POWER_USAGE_SUMMARY).apply {
                             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                         }
                         if (intent.resolveActivity(packageManager) != null) {
-                            startActivity(intent)
+                            startActivity(intent, zoomOptions)
                         } else {
                             val altIntent = Intent(android.provider.Settings.ACTION_BATTERY_SAVER_SETTINGS).apply {
                                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                             }
-                            startActivity(altIntent)
+                            startActivity(altIntent, zoomOptions)
                         }
                     }
                     com.agupta07505.smartisland.model.IslandMode.Hotspot -> {
                         val intent = Intent(android.provider.Settings.ACTION_WIRELESS_SETTINGS).apply {
                             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                         }
-                        startActivity(intent)
+                        startActivity(intent, zoomOptions)
                     }
                     com.agupta07505.smartisland.model.IslandMode.Timer,
                     com.agupta07505.smartisland.model.IslandMode.Stopwatch -> {
@@ -774,19 +844,19 @@ class SmartIslandOverlayService : AccessibilityService() {
                                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                             }
                         if (launchIntent.resolveActivity(packageManager) != null) {
-                            startActivity(launchIntent)
+                            startActivity(launchIntent, zoomOptions)
                         } else {
                             val clockIntent = Intent(android.provider.AlarmClock.ACTION_SHOW_ALARMS).apply {
                                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                             }
-                            startActivity(clockIntent)
+                            startActivity(clockIntent, zoomOptions)
                         }
                     }
                     else -> {
                         val launchIntent = packageManager.getLaunchIntentForPackage(notification.packageName)
                         if (launchIntent != null) {
                             launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                            startActivity(launchIntent)
+                            startActivity(launchIntent, zoomOptions)
                         } else {
                             Toast.makeText(this, "Opening ${notification.appName} (Demo)", Toast.LENGTH_SHORT).show()
                         }
@@ -796,6 +866,11 @@ class SmartIslandOverlayService : AccessibilityService() {
         }
         if (notification.mode != com.agupta07505.smartisland.model.IslandMode.Music) {
             notificationRepository.removeNotificationsForPackage(notification.packageName)
+        }
+        // Hide the overlay instantly so the app-open isn't held up by the
+        // collapse animation; it returns when the app closes.
+        runCatchingLogged(TAG, "hide island failed") {
+            islandView?.visibility = android.view.View.GONE
         }
         viewModel.collapse()
     }
@@ -808,10 +883,206 @@ class SmartIslandOverlayService : AccessibilityService() {
         }
         launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         runCatchingLogged(TAG, "Failed to launch shortcut app") {
-            startActivity(launchIntent)
+            startActivity(launchIntent, buildZoomLaunchOptions(viewModel.settings.value))
         }
         notificationRepository.removeNotificationsForPackage(packageName)
+        runCatchingLogged(TAG, "hide island failed") {
+            islandView?.visibility = android.view.View.GONE
+        }
         viewModel.collapse()
+    }
+
+    /**
+     * Toggles Bluetooth via the Quick Settings tile. Apps cannot enable or disable
+     * Bluetooth directly on Android 12+ without system dialogs or settings pages,
+     * but this accessibility service can pull down the shade and tap the tile,
+     * which toggles it in either direction.
+     */
+    /**
+     * Toggles Bluetooth via the Quick Settings tile. Apps cannot enable or disable
+     * Bluetooth directly on Android 12+ without system dialogs or settings pages,
+     * so the accessibility service opens the QS panel and performs an
+     * accessibility-node click on the tile. Node actions are framework-level:
+     * they bypass the island's window entirely, so the island is never hidden and
+     * the info menu stays visible the whole time.
+     */
+    private fun toggleBluetoothViaShade() {
+        // Keep the island fully visible, but make its window transparent to
+        // touches so the tile tap below passes through to the QS panel.
+        suppressShadeHide = true
+        if (::viewModel.isInitialized) {
+            updateWindowLayoutParams(isWindowExpanded, viewModel.settings.value)
+        }
+        performGlobalAction(
+            android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_QUICK_SETTINGS
+        )
+
+        serviceScope.launch {
+            runSuspendCatchingLogged(TAG, "Shade bluetooth toggle failed") {
+                val before = runCatching {
+                    Settings.Global.getInt(contentResolver, "bluetooth_on", 0) != 0
+                }.getOrDefault(false)
+                var tapped = false
+                repeat(6) {
+                    delay(500L)
+                    if (tapped) return@repeat
+                    val root = rootInActiveWindow ?: return@repeat
+                    val matches = root.findAccessibilityNodeInfosByText("Bluetooth")
+                    if (matches.isNullOrEmpty()) return@repeat
+                    val tile = matches.firstOrNull { node ->
+                        node.contentDescription?.toString() == "Bluetooth" &&
+                            node.text?.toString() == null
+                    } ?: matches.firstOrNull { node ->
+                        node.contentDescription?.toString() == "Bluetooth"
+                    } ?: return@repeat
+                    val bounds = android.graphics.Rect()
+                    tile.getBoundsInScreen(bounds)
+                    if (bounds.width() <= 0) return@repeat
+                    val tapPath = android.graphics.Path().apply {
+                        moveTo(bounds.exactCenterX(), bounds.exactCenterY())
+                    }
+                    val tap = android.accessibilityservice.GestureDescription.Builder()
+                        .addStroke(
+                            android.accessibilityservice.GestureDescription.StrokeDescription(
+                                tapPath,
+                                0,
+                                60
+                            )
+                        )
+                        .build()
+                    dispatchGesture(tap, null, null)
+                    tapped = true
+                }
+                delay(900L)
+                performGlobalAction(
+                    android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK
+                )
+                delay(400L)
+                suppressShadeHide = false
+                if (::viewModel.isInitialized) {
+                    updateWindowLayoutParams(isWindowExpanded, viewModel.settings.value)
+                }
+                val after = runCatching {
+                    Settings.Global.getInt(contentResolver, "bluetooth_on", 0) != 0
+                }.getOrDefault(before)
+                if (after == before) {
+                    Toast.makeText(
+                        this@SmartIslandOverlayService,
+                        "Couldn't toggle Bluetooth",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                } else {
+                    // Keep the info menu alive (and expanded) behind the shade.
+                    if (::viewModel.isInitialized) {
+                        viewModel.resetAutoCollapseTimer()
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Opens the app or settings screen matching the tapped idle info item
+     * (clock app for time, battery settings, bluetooth settings, hotspot settings).
+     * Returns true when something was actually opened (menu collapses then),
+     * false for no-op feedback (menu stays open).
+     */
+    private fun openIdleInfoItem(item: String) {
+        val zoomOptions = buildZoomLaunchOptions(viewModel.settings.value)
+        var openedSomething = false
+        runCatchingLogged(TAG, "Failed to open idle info item") {
+            when (item) {
+                "time" -> {
+                    openedSomething = true
+                    val clockPackages = listOf(
+                        "com.google.android.deskclock",
+                        "com.android.deskclock",
+                        "com.sec.android.app.clockpackage",
+                        "com.miui.clock",
+                        "com.coloros.clock",
+                        "com.huawei.deskclock"
+                    )
+                    val clockIntent = clockPackages
+                        .mapNotNull { packageManager.getLaunchIntentForPackage(it) }
+                        .firstOrNull()
+                    if (clockIntent != null) {
+                        clockIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        startActivity(clockIntent, zoomOptions)
+                    } else {
+                        val fallback = Intent(android.provider.AlarmClock.ACTION_SHOW_TIMERS).apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                        startActivity(fallback, zoomOptions)
+                    }
+                }
+                "battery" -> {
+                    val intent = Intent(Intent.ACTION_POWER_USAGE_SUMMARY).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    if (intent.resolveActivity(packageManager) != null) {
+                        startActivity(intent, zoomOptions)
+                    } else {
+                        val alt = Intent(Settings.ACTION_BATTERY_SAVER_SETTINGS).apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                        startActivity(alt, zoomOptions)
+                    }
+                }
+                "bluetooth" -> {
+                    // Toggle via the Quick Settings tile: apps cannot enable or
+                    // disable Bluetooth directly on Android 12+ without dialogs or
+                    // settings pages. The tile handles both directions.
+                    openedSomething = false
+                    toggleBluetoothViaShade()
+                }
+                "hotspot" -> {
+                    openedSomething = true
+                    com.agupta07505.smartisland.util.HotspotUtil.openHotspotSettings(this)
+                }
+            }
+        }
+        if (openedSomething) {
+            // Close the menu instantly instead of waiting for the collapse
+            // animation: the app/screen opening covers the transition.
+            runCatchingLogged(TAG, "hide island failed") {
+                islandView?.visibility = android.view.View.GONE
+            }
+            viewModel.collapse()
+        }
+    }
+
+    /**
+     * Builds launch options that scale the incoming app window up from the island pill's
+     * on-screen position, so the app visually grows out of the pill (Dynamic Island style)
+     * instead of sliding in from the top of the screen. The source is always the small
+     * collapsed pill rect — growing from the tall expanded-card rect makes the app appear
+     * to open from the bottom of that strip.
+     */
+    private fun buildZoomLaunchOptions(settings: SmartIslandSettings): Bundle? {
+        val view = islandView ?: return null
+        return runCatchingLogged(TAG, "Failed to build zoom launch options") {
+            val density = resources.displayMetrics.density
+            val screenWidthPx = resources.displayMetrics.widthPixels
+            val startW = (settings.width * density).toInt()
+            val startH = (settings.height * density).toInt()
+            val screenLeft = (screenWidthPx / 2f + settings.xOffset * density - startW / 2f).toInt()
+            val screenTop = (settings.yOffset * density).toInt()
+            val location = IntArray(2)
+            view.getLocationOnScreen(location)
+            val options = ActivityOptions.makeScaleUpAnimation(
+                view,
+                screenLeft - location[0],
+                screenTop - location[1],
+                startW,
+                startH
+            )
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                options.setPendingIntentBackgroundActivityStartMode(
+                    ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
+                )
+            }
+            options.toBundle()
+        }
     }
 
     private fun openCurrentNotificationInFloatingWindow() {
@@ -924,5 +1195,55 @@ class SmartIslandOverlayService : AccessibilityService() {
         private const val OVERLAY_CHANNEL_ID = "smart_island_overlay"
         private const val OVERLAY_CHANNEL_NAME = "Smart Island overlay"
         private const val AUTO_COLLAPSE_DELAY_MS = 220L
+    }
+
+    /**
+     * Detects whether the notification shade is open from a SystemUI window-state
+     * event. Class names vary wildly across ROMs (often just "FrameLayout"), so the
+     * reliable signal is the window's on-screen bounds: the status bar strip is small
+     * when collapsed, and covers most of the screen when the shade is open.
+     */
+    private fun isNotificationShadeWindow(event: AccessibilityEvent): Boolean {
+        val className = event.className?.toString() ?: ""
+        if (className.contains("NotificationShade") ||
+            className.contains("statusbar") ||
+            className.contains("StatusBar")
+        ) {
+            return true
+        }
+        val source = event.source
+        if (source != null) {
+            val rect = android.graphics.Rect()
+            runCatchingLogged(TAG, "source bounds failed") {
+                source.getBoundsInScreen(rect)
+            }
+            val screenHeight = resources.displayMetrics.heightPixels
+            if (rect.height() > screenHeight / 2) {
+                return true
+            }
+        }
+        return detectShadeFromWindows()
+    }
+
+    /**
+     * Scans the currently visible accessibility windows for an expanded SystemUI
+     * status bar window (the shade). The status bar (TYPE_SYSTEM) window covers the
+     * full screen while the shade is open and is a small strip when collapsed.
+     */
+    private fun detectShadeFromWindows(): Boolean {
+        val windows = getWindows() ?: return false
+        val screenHeight = resources.displayMetrics.heightPixels
+        for (window in windows) {
+            if (window.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_SYSTEM) {
+                val bounds = android.graphics.Rect()
+                runCatchingLogged(TAG, "window bounds failed") {
+                    window.getBoundsInScreen(bounds)
+                }
+                if (bounds.height() > screenHeight / 2) {
+                    return true
+                }
+            }
+        }
+        return false
     }
 }

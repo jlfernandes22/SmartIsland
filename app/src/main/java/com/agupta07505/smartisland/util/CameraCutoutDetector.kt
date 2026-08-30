@@ -8,11 +8,18 @@
 package com.agupta07505.smartisland.util
 
 import android.content.Context
+import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.os.Build
+import android.provider.Settings
+import android.util.Log
 import android.view.DisplayCutout
+import android.view.Gravity
+import android.view.View
 import android.view.WindowManager
 import com.agupta07505.smartisland.data.SmartIslandSettings
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
 
 data class DetectedCutoutInfo(
     val xOffsetDp: Float,
@@ -23,6 +30,10 @@ data class DetectedCutoutInfo(
 )
 
 object CameraCutoutDetector {
+
+    private const val TAG = "CameraCutoutDetector"
+    private const val CUTOUT_PADDING_W_DP = 6f
+    private const val CUTOUT_PADDING_H_DP = 10f
 
     /**
      * Calculates the physical pill position and dimensions matching the device's camera cutout coordinates.
@@ -51,14 +62,12 @@ object CameraCutoutDetector {
             SmartIslandSettings.MAX_Y_OFFSET
         )
 
-        val paddingW = 24f
-        val paddingH = 10f
-        val widthDp = ((right - left).toFloat() / density + paddingW).coerceIn(
-            SmartIslandSettings.MIN_WIDTH,
+        val widthDp = ((right - left).toFloat() / density + CUTOUT_PADDING_W_DP).coerceIn(
+            SmartIslandSettings.MIN_IDLE_WIDTH,
             SmartIslandSettings.MAX_WIDTH
         )
-        val heightDp = ((bottom - top).toFloat() / density + paddingH).coerceIn(
-            SmartIslandSettings.MIN_HEIGHT,
+        val heightDp = ((bottom - top).toFloat() / density + CUTOUT_PADDING_H_DP).coerceIn(
+            SmartIslandSettings.MIN_IDLE_HEIGHT,
             SmartIslandSettings.MAX_HEIGHT
         )
 
@@ -88,34 +97,116 @@ object CameraCutoutDetector {
     )
 
     /**
-     * Detects hardware camera cutout on the current device using WindowInsets / DisplayCutout API.
+     * Suspending auto-detection of the hardware camera cutout.
+     *
+     * Detection order:
+     *  1. Display.getCutout() (API 30+) — works without any window layout.
+     *  2. A transient 1x1 overlay probe view that reads WindowInsets display cutout (API 28+).
+     *  3. Status-bar-height fallback (no hardware cutout reported).
+     *
+     * Must be invoked on the main thread (adds/removes a WindowManager view).
+     */
+    suspend fun detectAsync(context: Context): DetectedCutoutInfo {
+        val fromDisplay = detectFromDisplay(context)
+        if (fromDisplay != null) {
+            Log.d(TAG, "detectAsync: resolved via Display.getCutout: $fromDisplay")
+            return fromDisplay
+        }
+        val fromInsets = detectViaWindowInsets(context)
+        if (fromInsets != null) {
+            Log.d(TAG, "detectAsync: resolved via window insets probe: $fromInsets")
+            return fromInsets
+        }
+        val fallback = fallbackInfo(context)
+        Log.w(TAG, "detectAsync: no hardware cutout reported; using fallback $fallback")
+        return fallback
+    }
+
+    /**
+     * Synchronous detection using Display.getCutout() (API 30+) only.
      */
     fun detect(context: Context): DetectedCutoutInfo {
+        return detectFromDisplay(context) ?: fallbackInfo(context)
+    }
+
+    private fun detectFromDisplay(context: Context): DetectedCutoutInfo? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
         val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager
-            ?: return fallbackInfo(context)
+            ?: return null
+        val display = runCatching { windowManager.defaultDisplay }.getOrNull() ?: return null
+        val cutout: DisplayCutout? = runCatching { display.cutout }.getOrNull()
+        return cutoutToInfo(cutout, context)
+    }
 
-        val metrics = context.resources.displayMetrics
-        val screenWidthPx = metrics.widthPixels
-        val density = metrics.density
+    private fun cutoutToInfo(cutout: DisplayCutout?, context: Context): DetectedCutoutInfo? {
+        val boundingRects = cutout?.boundingRects
+        if (boundingRects.isNullOrEmpty()) return null
+        val topCutout = boundingRects.minByOrNull { it.top }
+        if (topCutout == null || topCutout.height() <= 0) return null
+        return calculateCutoutOffset(
+            topCutout,
+            context.resources.displayMetrics.widthPixels,
+            context.resources.displayMetrics.density
+        )
+    }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val display = runCatching { windowManager.defaultDisplay }.getOrNull()
-            val cutout: DisplayCutout? = try {
-                display?.cutout
-            } catch (e: Throwable) {
-                null
+    /**
+     * Transient probe window that reads the display cutout from WindowInsets.
+     * Best-effort for API 28/29 where Display.getCutout() does not exist.
+     */
+    private suspend fun detectViaWindowInsets(context: Context): DetectedCutoutInfo? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return null
+        if (!Settings.canDrawOverlays(context)) return null
+        val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager
+            ?: return null
+        var probeView: View? = null
+        val result = suspendCancellableCoroutine { continuation ->
+            var finished = false
+            val finish = { result: DetectedCutoutInfo? ->
+                if (!finished) {
+                    finished = true
+                    continuation.resume(result)
+                }
             }
-
-            val boundingRects = cutout?.boundingRects
-            if (!boundingRects.isNullOrEmpty()) {
-                val topCutout = boundingRects.minByOrNull { it.top }
-                if (topCutout != null && topCutout.height() > 0) {
-                    return calculateCutoutOffset(topCutout, screenWidthPx, density)
+            val view = View(context)
+            probeView = view
+            view.setOnApplyWindowInsetsListener { _, insets ->
+                val detected = cutoutToInfo(insets.displayCutout, context)
+                finish(detected)
+                insets
+            }
+            val params = WindowManager.LayoutParams(
+                1,
+                1,
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                PixelFormat.TRANSLUCENT
+            ).apply {
+                gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+            }
+            val added = runCatching {
+                windowManager.addView(view, params)
+            }.isSuccess
+            if (!added) {
+                finish(null)
+                return@suspendCancellableCoroutine
+            }
+            view.post { view.requestApplyInsets() }
+            view.postDelayed({ finish(null) }, 1500L)
+            continuation.invokeOnCancellation {
+                runCatching { windowManager.removeView(view) }
+            }
+        }
+        probeView?.let { v ->
+            runCatching {
+                if (v.isAttachedToWindow) {
+                    windowManager.removeView(v)
                 }
             }
         }
-
-        return fallbackInfo(context)
+        return result
     }
 
     private fun fallbackInfo(context: Context): DetectedCutoutInfo {

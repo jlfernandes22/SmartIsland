@@ -8,7 +8,9 @@
 package com.agupta07505.smartisland.data
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SmartIslandSettingsTest {
@@ -35,6 +37,20 @@ class SmartIslandSettingsTest {
         assertEquals(true, settings.allowNetworkChecks)
         assertEquals(false, settings.enableNotificationHistory)
         assertEquals(72, settings.notificationHistoryRetentionHours)
+        assertEquals(false, settings.useCutoutSizeWhenIdle)
+        assertEquals(112f, settings.idleWidth)
+        assertEquals(34f, settings.idleHeight)
+        assertEquals(false, settings.idleSizeAutoDetected)
+        assertEquals(true, settings.hideWhenShadeOpen)
+        assertEquals(SmartIslandSettings.GestureActions.DISMISS, settings.swipeUpAction)
+        assertEquals(SmartIslandSettings.GestureActions.DISMISS, settings.holdSwipeUpAction)
+        assertEquals(SmartIslandSettings.GestureActions.FLOATING_WINDOW, settings.swipeDownAction)
+        assertEquals(SmartIslandSettings.GestureActions.TOGGLE, settings.tapAction)
+        assertEquals(SmartIslandSettings.IdleTapModes.APPS, settings.idleTapMode)
+        assertEquals(true, settings.idleInfoShowTime)
+        assertEquals(true, settings.idleInfoShowBattery)
+        assertEquals(true, settings.idleInfoShowBluetooth)
+        assertEquals(true, settings.idleInfoShowHotspot)
     }
 
     @Test
@@ -45,5 +61,14 @@ class SmartIslandSettingsTest {
 
         assertEquals(settings1, settings2)
         assertNotEquals(settings1, settings3)
+    }
+
+    @Test
+    fun testGestureActionsValidation() {
+        assertTrue(SmartIslandSettings.GestureActions.isValid("DISMISS"))
+        assertTrue(SmartIslandSettings.GestureActions.isValid("COLLAPSE"))
+        assertTrue(SmartIslandSettings.GestureActions.isValid("NONE"))
+        assertFalse(SmartIslandSettings.GestureActions.isValid("SWIPE_UP"))
+        assertFalse(SmartIslandSettings.GestureActions.isValid(""))
     }
 }

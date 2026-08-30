@@ -30,10 +30,18 @@ import com.agupta07505.smartisland.R
 
 import androidx.compose.foundation.clickable
 import androidx.compose.ui.text.style.TextOverflow
+import com.agupta07505.smartisland.data.SmartIslandSettings
+import com.agupta07505.smartisland.data.SmartIslandSettingsRepository
+import kotlinx.coroutines.launch
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun GesturesSection() {
+fun GesturesSection(
+    settings: SmartIslandSettings,
+    repository: SmartIslandSettingsRepository
+) {
     var selectedTab by remember { mutableIntStateOf(0) }
+    val scope = rememberCoroutineScope()
     val tabs = listOf(
         stringResource(R.string.gesture_1_tap_tab),
         stringResource(R.string.gesture_2_swipe_up_tab),
@@ -48,6 +56,205 @@ fun GesturesSection() {
             .padding(bottom = 24.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
+        // Customizable Gesture Action Mappings
+        Card(
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+            shape = RoundedCornerShape(20.dp),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)),
+            modifier = Modifier.fillMaxWidth(),
+            elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            Icons.Rounded.Tune,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    Column {
+                        Text(
+                            text = stringResource(R.string.gesture_actions_title),
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = stringResource(R.string.gesture_actions_desc),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
+
+                GestureActionDropdown(
+                    title = stringResource(R.string.gesture_swipe_up_action_title),
+                    subtitle = stringResource(R.string.gesture_swipe_up_action_desc),
+                    icon = Icons.Rounded.ArrowUpward,
+                    color = Color(0xFFEF4444),
+                    options = SmartIslandSettings.GestureActions.SWIPE_UP_OPTIONS,
+                    selected = settings.swipeUpAction,
+                    onSelect = { scope.launch { repository.setSwipeUpAction(it) } }
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f))
+
+                GestureActionDropdown(
+                    title = stringResource(R.string.gesture_hold_swipe_up_action_title),
+                    subtitle = stringResource(R.string.gesture_hold_swipe_up_action_desc),
+                    icon = Icons.Rounded.DeleteSweep,
+                    color = Color(0xFFF59E0B),
+                    options = SmartIslandSettings.GestureActions.HOLD_SWIPE_UP_OPTIONS,
+                    selected = settings.holdSwipeUpAction,
+                    onSelect = { scope.launch { repository.setHoldSwipeUpAction(it) } }
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f))
+
+                GestureActionDropdown(
+                    title = stringResource(R.string.gesture_swipe_down_action_title),
+                    subtitle = stringResource(R.string.gesture_swipe_down_action_desc),
+                    icon = Icons.Rounded.ArrowDownward,
+                    color = Color(0xFF10B981),
+                    options = SmartIslandSettings.GestureActions.SWIPE_DOWN_OPTIONS,
+                    selected = settings.swipeDownAction,
+                    onSelect = { scope.launch { repository.setSwipeDownAction(it) } }
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f))
+
+                GestureActionDropdown(
+                    title = stringResource(R.string.gesture_tap_action_title),
+                    subtitle = stringResource(R.string.gesture_tap_action_desc),
+                    icon = Icons.Rounded.TouchApp,
+                    color = Color(0xFF38BDF8),
+                    options = SmartIslandSettings.GestureActions.TAP_OPTIONS,
+                    selected = settings.tapAction,
+                    onSelect = { scope.launch { repository.setTapAction(it) } }
+                )
+            }
+        }
+
+        // Idle Tap Behavior
+        Card(
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+            shape = RoundedCornerShape(20.dp),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)),
+            modifier = Modifier.fillMaxWidth(),
+            elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFF06B6D4).copy(alpha = 0.15f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            Icons.Rounded.Home,
+                            contentDescription = null,
+                            tint = Color(0xFF06B6D4),
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    Column {
+                        Text(
+                            text = stringResource(R.string.idle_tap_behavior_title),
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = stringResource(R.string.idle_tap_behavior_desc),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    listOf(
+                        SmartIslandSettings.IdleTapModes.APPS to stringResource(R.string.idle_tap_mode_apps),
+                        SmartIslandSettings.IdleTapModes.INFO to stringResource(R.string.idle_tap_mode_info)
+                    ).forEach { (mode, label) ->
+                        val isSelected = settings.idleTapMode == mode
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                            border = BorderStroke(
+                                1.dp,
+                                if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)
+                            ),
+                            modifier = Modifier
+                                .weight(1f)
+                                .clickable { scope.launch { repository.setIdleTapMode(mode) } }
+                        ) {
+                            Text(
+                                text = label,
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                color = if (isSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier
+                                    .padding(vertical = 10.dp)
+                                    .fillMaxWidth(),
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                            )
+                        }
+                    }
+                }
+
+                if (settings.idleTapMode == SmartIslandSettings.IdleTapModes.INFO) {
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
+
+                    IdleInfoToggleRow(
+                        label = stringResource(R.string.idle_info_time_title),
+                        checked = settings.idleInfoShowTime,
+                        onCheckedChange = { scope.launch { repository.setIdleInfoShowTime(it) } }
+                    )
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f))
+                    IdleInfoToggleRow(
+                        label = stringResource(R.string.idle_info_battery_title),
+                        checked = settings.idleInfoShowBattery,
+                        onCheckedChange = { scope.launch { repository.setIdleInfoShowBattery(it) } }
+                    )
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f))
+                    IdleInfoToggleRow(
+                        label = stringResource(R.string.idle_info_bluetooth_title),
+                        checked = settings.idleInfoShowBluetooth,
+                        onCheckedChange = { scope.launch { repository.setIdleInfoShowBluetooth(it) } }
+                    )
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f))
+                    IdleInfoToggleRow(
+                        label = stringResource(R.string.idle_info_hotspot_title),
+                        checked = settings.idleInfoShowHotspot,
+                        onCheckedChange = { scope.launch { repository.setIdleInfoShowHotspot(it) } }
+                    )
+                }
+            }
+        }
+
         // Quick Reference Card
         Card(
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -256,6 +463,146 @@ fun GesturesSection() {
             )
         }
     }
+}
+
+@Composable
+private fun IdleInfoToggleRow(
+    label: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.Medium,
+            color = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.weight(1f)
+        )
+        Spacer(Modifier.width(12.dp))
+        Switch(checked = checked, onCheckedChange = onCheckedChange)
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun GestureActionDropdown(
+    title: String,
+    subtitle: String,
+    icon: ImageVector,
+    color: Color,
+    options: List<String>,
+    selected: String,
+    onSelect: (String) -> Unit
+) {
+    var menuExpanded by remember { mutableStateOf(false) }
+
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(32.dp)
+                    .clip(CircleShape)
+                    .background(color.copy(alpha = 0.15f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(icon, contentDescription = null, tint = color, modifier = Modifier.size(17.dp))
+            }
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+
+        ExposedDropdownMenuBox(
+            expanded = menuExpanded,
+            onExpandedChange = { menuExpanded = it },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            OutlinedTextField(
+                value = gestureActionLabel(selected),
+                onValueChange = {},
+                readOnly = true,
+                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = menuExpanded) },
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = color,
+                    unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant,
+                    focusedContainerColor = color.copy(alpha = 0.06f),
+                    unfocusedContainerColor = color.copy(alpha = 0.06f)
+                ),
+                textStyle = MaterialTheme.typography.bodyMedium,
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier
+                    .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable, true)
+                    .fillMaxWidth()
+            )
+
+            ExposedDropdownMenu(
+                expanded = menuExpanded,
+                onDismissRequest = { menuExpanded = false }
+            ) {
+                options.forEach { option ->
+                    val isSelected = option == selected
+                    DropdownMenuItem(
+                        text = {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = gestureActionLabel(option),
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                    color = if (isSelected) color else MaterialTheme.colorScheme.onSurface
+                                )
+                                if (isSelected) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.CheckCircle,
+                                        contentDescription = null,
+                                        tint = color,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            }
+                        },
+                        onClick = {
+                            menuExpanded = false
+                            onSelect(option)
+                        }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun gestureActionLabel(action: String): String = when (action) {
+    SmartIslandSettings.GestureActions.DISMISS -> stringResource(R.string.gesture_action_dismiss)
+    SmartIslandSettings.GestureActions.DISMISS_ALL -> stringResource(R.string.gesture_action_dismiss_all)
+    SmartIslandSettings.GestureActions.COLLAPSE -> stringResource(R.string.gesture_action_collapse)
+    SmartIslandSettings.GestureActions.FLOATING_WINDOW -> stringResource(R.string.gesture_action_floating_window)
+    SmartIslandSettings.GestureActions.TOGGLE -> stringResource(R.string.gesture_action_toggle)
+    else -> stringResource(R.string.gesture_action_none)
 }
 
 @Composable

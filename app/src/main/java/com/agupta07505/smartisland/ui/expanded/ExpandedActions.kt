@@ -11,6 +11,7 @@ import android.app.ActivityOptions
 import android.app.PendingIntent
 import android.content.Context
 import android.os.Build
+import android.os.Bundle
 import com.agupta07505.smartisland.di.SmartIslandRepositories
 import com.agupta07505.smartisland.model.IslandMode
 import com.agupta07505.smartisland.model.IslandNotification
@@ -60,14 +61,22 @@ fun triggerAction(context: Context, packageName: String, actionIntent: PendingIn
     }
 }
 
-fun sendIntentWithOptions(context: Context, pendingIntent: PendingIntent) {
+fun sendIntentWithOptions(
+    context: Context,
+    pendingIntent: PendingIntent,
+    optionsBundle: Bundle? = null
+) {
     android.util.Log.d("ExpandedActions", "sendIntentWithOptions: sending pendingIntent=$pendingIntent")
     var sent = false
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
         try {
-            val options = ActivityOptions.makeBasic()
-                .setPendingIntentBackgroundActivityStartMode(ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED)
-                .toBundle()
+            val options = if (optionsBundle != null) {
+                optionsBundle
+            } else {
+                ActivityOptions.makeBasic()
+                    .setPendingIntentBackgroundActivityStartMode(ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED)
+                    .toBundle()
+            }
             pendingIntent.send(context, 0, null, null, null, null, options)
             sent = true
         } catch (e: Exception) {
@@ -76,8 +85,13 @@ fun sendIntentWithOptions(context: Context, pendingIntent: PendingIntent) {
     }
     if (!sent) {
         try {
-            pendingIntent.send(context, 0, null)
-            sent = true
+            if (optionsBundle != null) {
+                pendingIntent.send(context, 0, null, null, null, null, optionsBundle)
+                sent = true
+            } else {
+                pendingIntent.send(context, 0, null)
+                sent = true
+            }
         } catch (e: Exception) {
             try {
                 pendingIntent.send()

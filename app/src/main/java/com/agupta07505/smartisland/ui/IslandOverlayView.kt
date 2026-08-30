@@ -97,7 +97,8 @@ fun IslandOverlayView(
     isInputActive: Boolean = false,
     onReplyStateChanged: (Boolean) -> Unit = {},
     onDismissAllNotifications: () -> Unit = {},
-    isFullWidth: Boolean = true
+    isFullWidth: Boolean = true,
+    onOpenIdleInfoItem: (String) -> Unit = {}
 ) {
     // Fix #1: rememberUpdatedState ensures the lambda is always fresh
     // even though pointerInput(Unit) never restarts its coroutine
@@ -107,10 +108,12 @@ fun IslandOverlayView(
     val currentOnOpenFloatingWindow by rememberUpdatedState(onOpenFloatingWindow)
     val currentOnOpenNotification by rememberUpdatedState(onOpenNotification)
     val currentExpanded by rememberUpdatedState(expanded)
+    val currentSettings by rememberUpdatedState(settings)
     val haptic = LocalHapticFeedback.current
 
     val scope = rememberCoroutineScope()
     var dragOffset by remember { mutableStateOf(0f) }
+    var infoPageActive by remember { mutableStateOf(false) }
 
     val context = LocalContext.current
     val displayMetrics = context.resources.displayMetrics
@@ -153,18 +156,25 @@ fun IslandOverlayView(
     }
 
     val compactGap = COMPACT_INDICATOR_GAP_DP.dp
-    val miniPillWidth = settings.width.dp
-    val circleSize = settings.height.dp
-    val compactShapes = compactNotificationShapes(notifications.size, expanded)
+    val isIdle = notifications.isEmpty() && !expanded
+    val effectiveWidth = if (isIdle && settings.useCutoutSizeWhenIdle) settings.idleWidth else settings.width
+    val effectiveHeight = if (isIdle && settings.useCutoutSizeWhenIdle) settings.idleHeight else settings.height
+    val miniPillWidth = effectiveWidth.dp
+    val circleSize = effectiveHeight.dp
     val hasCompanion = notifications.size >= 2
-    val collapsedGroupWidth = settings.width.dp + if (hasCompanion) compactGap + circleSize else 0.dp
-    val collapsedMainLeft = (screenCenter + settings.xOffset.dp - settings.width.dp / 2f)
+    val hasTertiary = notifications.size >= 3
+    val companionGroupWidth = when {
+        !hasCompanion -> 0.dp
+        expanded -> compactGap + miniPillWidth + if (hasTertiary) compactGap + circleSize else 0.dp
+        else -> compactGap + circleSize
+    }
+    val collapsedMainLeft = (screenCenter + settings.xOffset.dp - effectiveWidth.dp / 2f)
         .coerceIn(
             compactGap,
-            (screenWidth - collapsedGroupWidth - compactGap).coerceAtLeast(compactGap)
+            (screenWidth - companionGroupWidth - compactGap).coerceAtLeast(compactGap)
         )
     val collapsedMainOffset = if (isFullWidth) {
-        collapsedMainLeft + settings.width.dp / 2f - screenCenter
+        collapsedMainLeft + effectiveWidth.dp / 2f - screenCenter
     } else {
         if (hasCompanion) -(compactGap + circleSize) / 2f else 0.dp
     }
@@ -198,10 +208,10 @@ fun IslandOverlayView(
     val isHiding = isIdleHiding || (settings.autoHidePill && isAutoHidden)
 
     val width by transition.animateDp(transitionSpec = { sizeSpec }, label = "islandWidth") {
-        if (it) expandedWidth else if (isHiding) 0.dp else settings.width.dp
+        if (it) expandedWidth else if (isHiding) 0.dp else effectiveWidth.dp
     }
     val height by transition.animateDp(transitionSpec = { heightSpec }, label = "islandHeight") {
-        if (it) expandedHeight else if (isHiding) 0.dp else settings.height.dp
+        if (it) expandedHeight else if (isHiding) 0.dp else effectiveHeight.dp
     }
     val yOffset by transition.animateDp(transitionSpec = { sizeSpec }, label = "islandYOffset") {
         if (it) expandedTopOffset else 0.dp
@@ -288,8 +298,9 @@ fun IslandOverlayView(
         notifications.indexOfFirst { it.key == tertiaryNotification.key }
     } else -1
     val isSplitMode = secondaryNotification != null
-    val secondaryIsPill = compactShapes.singleOrNull() == CompactNotificationShape.MiniPill
-    val showTertiaryPill = compactShapes.size == 2 && tertiaryNotification != null
+    // When expanded, the secondary bubble morphs into a full mini-pill beside the main pill
+    val secondaryIsPill = expanded
+    val showTertiaryBubble = tertiaryNotification != null
 
     val secondaryAlpha by animateFloatAsState(
         targetValue = if (isSplitMode && !isHiding) 1f else 0f,
@@ -319,30 +330,42 @@ fun IslandOverlayView(
         label = "secondaryBubbleCorner"
     )
     val tertiaryAlpha by animateFloatAsState(
-        targetValue = if (showTertiaryPill && !isHiding) 1f else 0f,
+        targetValue = if (showTertiaryBubble && !expanded && !isHiding) 1f else 0f,
         animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
         label = "tertiaryAlpha"
     )
     val tertiaryScale by animateFloatAsState(
-        targetValue = if (showTertiaryPill && !isHiding) 1f else 0.3f,
+        targetValue = if (showTertiaryBubble && !isHiding) 1f else 0.3f,
         animationSpec = spring(dampingRatio = 0.68f, stiffness = 480f),
         label = "tertiaryScale"
     )
 
-    val expandedCompactX = collapsedMainLeft
-    val collapsedSecondaryOffset = if (isFullWidth) {
-        collapsedMainLeft + settings.width.dp + compactGap - screenCenter + circleSize / 2f
-    } else {
-        (settings.width.dp + compactGap) / 2f
-    }
+    // The bubble Boxes are centered by the parent's contentAlignment, and
+    // absoluteOffset translates them from that centered base position.
+    // Full-width windows are centered at the screen center; the narrow collapsed
+    // window is centered on the pill group instead.
+    val baseCenter = if (isFullWidth) screenCenter else collapsedMainLeft + companionGroupWidth / 2f
+
+    // Secondary bubble: circle right of the main pill when collapsed; when expanded
+    // the next most important notification snaps to the middle (punch-hole position)
+    // above the card — only that one stays visible, the others are hidden.
+    val collapsedSecondaryOffset = collapsedMainLeft + effectiveWidth.dp + compactGap +
+        circleSize / 2f - baseCenter
+    val expandedSecondaryLeft = 0.dp
     val secondaryOffset by animateDpAsState(
-        targetValue = when {
-            !expanded -> collapsedSecondaryOffset
-            secondaryIsPill -> if (isFullWidth) (expandedCompactX - screenCenter + miniPillWidth / 2f) else 0.dp
-            else -> if (isFullWidth) (expandedCompactX + miniPillWidth + compactGap - screenCenter + circleSize / 2f) else ((miniPillWidth + compactGap) / 2f)
-        },
+        targetValue = if (!expanded) collapsedSecondaryOffset else expandedSecondaryLeft,
         animationSpec = spring(dampingRatio = 0.75f, stiffness = 520f),
         label = "secondaryOffset"
+    )
+
+    // Tertiary bubble: always a circle, right of the secondary circle when collapsed;
+    // hidden while expanded (only the secondary stays next to the expanded card).
+    val collapsedTertiaryOffset = collapsedMainLeft + effectiveWidth.dp + compactGap +
+        circleSize + compactGap + circleSize / 2f - baseCenter
+    val tertiaryOffset by animateDpAsState(
+        targetValue = collapsedTertiaryOffset,
+        animationSpec = spring(dampingRatio = 0.75f, stiffness = 520f),
+        label = "tertiaryOffset"
     )
 
     // Outer Box: Fills the entire WindowManager window bounds (which are padded for easy touch)
@@ -370,8 +393,8 @@ fun IslandOverlayView(
         if (isHiding && !currentExpanded) {
             Box(
                 modifier = Modifier
-                    .width(settings.width.dp)
-                    .height(settings.height.dp)
+                    .width(effectiveWidth.dp)
+                    .height(effectiveHeight.dp)
                     .graphicsLayer {
                         translationX = collapsedMainOffset.toPx()
                     }
@@ -445,18 +468,32 @@ fun IslandOverlayView(
 
                                 if (currentExpanded) {
                                     if (isDragging && dragOffset < swipeUpThreshold) {
-                                        if (isHoldRegistered || totalElapsedMs >= HOLD_GESTURE_THRESHOLD_MS) {
-                                            currentOnDismissAll()
+                                        val action = if (isHoldRegistered || totalElapsedMs >= HOLD_GESTURE_THRESHOLD_MS) {
+                                            currentSettings.holdSwipeUpAction
                                         } else {
-                                            currentOnDismiss()
+                                            currentSettings.swipeUpAction
+                                        }
+                                        when (action) {
+                                            SmartIslandSettings.GestureActions.DISMISS_ALL -> currentOnDismissAll()
+                                            SmartIslandSettings.GestureActions.DISMISS -> currentOnDismiss()
+                                            SmartIslandSettings.GestureActions.COLLAPSE -> currentOnToggle()
+                                            else -> Unit
                                         }
                                     } else if (isDragging && dragOffset > swipeDownThreshold) {
-                                        currentOnOpenFloatingWindow()
+                                        when (currentSettings.swipeDownAction) {
+                                            SmartIslandSettings.GestureActions.FLOATING_WINDOW -> currentOnOpenFloatingWindow()
+                                            SmartIslandSettings.GestureActions.COLLAPSE -> currentOnToggle()
+                                            else -> Unit
+                                        }
                                     } else if (!isDragging || abs(dragOffset) < 10f) {
                                         if (!isHoldRegistered) {
                                             val currentNotification = notifications.getOrNull(safeIndex)
-                                            if (currentNotification != null) {
+                                            if (currentNotification != null && !infoPageActive) {
                                                 currentOnOpenNotification(currentNotification)
+                                            } else if (infoPageActive) {
+                                                // The info menu is displayed: the rows handle
+                                                // their own taps; never collapse or open apps
+                                                // from a tap on the menu itself.
                                             } else {
                                                 SmartIslandRepositories.notificationRepository(context).resetTimer()
                                             }
@@ -464,7 +501,10 @@ fun IslandOverlayView(
                                     }
                                 } else {
                                     if (!isDragging || abs(dragOffset) < 10f) {
-                                        currentOnToggle()
+                                        when (currentSettings.tapAction) {
+                                            SmartIslandSettings.GestureActions.TOGGLE -> currentOnToggle()
+                                            else -> Unit
+                                        }
                                     }
                                 }
                                 break
@@ -509,8 +549,8 @@ fun IslandOverlayView(
             if (collapsedAlpha > 0f) {
                 Box(
                     modifier = Modifier
-                        .width(settings.width.dp)
-                        .height(settings.height.dp)
+                        .width(effectiveWidth.dp)
+                        .height(effectiveHeight.dp)
                         .align(Alignment.TopCenter)
                         .graphicsLayer {
                             alpha = collapsedAlpha
@@ -552,7 +592,9 @@ fun IslandOverlayView(
                         // minimum on compact call or battery content.
                         onHeightMeasured = { expandedHeight = it },
                         settings = settings,
-                        onReplyStateChanged = onReplyStateChanged
+                        onReplyStateChanged = onReplyStateChanged,
+                        onOpenIdleInfoItem = onOpenIdleInfoItem,
+                        onInfoPageActive = { infoPageActive = it }
                     )
                 }
             }
@@ -635,18 +677,18 @@ fun IslandOverlayView(
                 modifier = Modifier
                     .absoluteOffset {
                         IntOffset(
-                            (expandedCompactX - screenCenter + miniPillWidth / 2f).roundToPx(),
+                            tertiaryOffset.roundToPx(),
                             0
                         )
                     }
-                    .width(miniPillWidth)
+                    .width(circleSize)
                     .height(circleSize)
                     .graphicsLayer {
                         alpha = tertiaryAlpha
                         scaleX = tertiaryScale * switchScaleAnim.value
                         scaleY = tertiaryScale * switchScaleAnim.value
                     }
-                    .clip(RoundedCornerShape(settings.cornerRadius.dp))
+                    .clip(CircleShape)
                     .background(Color.Black.copy(alpha = settings.opacity))
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },

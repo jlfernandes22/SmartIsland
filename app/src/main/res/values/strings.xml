@@ -170,6 +170,13 @@
     <string name="toast_applied_right_preset">Applied Right Corner preset (+%1$d dp)</string>
     <string name="toast_applied_compact_preset">Applied Compact Pill preset</string>
     <string name="toast_reset_position">Position reset to factory defaults</string>
+    <string name="idle_size_title">Idle Pill Size (Camera Cutout)</string>
+    <string name="idle_size_desc">When no notifications are active, size the pill to match your camera cutout</string>
+    <string name="btn_detect_cutout">Auto-Detect Camera Cutout</string>
+    <string name="toast_cutout_detected">Camera cutout detected: %1$d x %2$d dp</string>
+    <string name="toast_cutout_not_detected">No hardware cutout reported; using defaults</string>
+    <string name="slider_idle_width">Idle Pill Width</string>
+    <string name="slider_idle_height">Idle Pill Height</string>
 
     <!-- Customizations / Studio -->
     <string name="opacity_card_title">Island Opacity &amp; Transparency</string>
@@ -242,6 +249,30 @@
     <string name="gesture_5_swipe_horizontal_title">5. Horizontal Swipe (Left / Right)</string>
     <string name="gesture_5_swipe_horizontal_sub">Switch Between Multiple Notifications</string>
     <string name="gesture_5_swipe_horizontal_desc">When multiple notifications are queued in Smart Island, swipe left or right horizontally on the expanded card to page between active alerts.</string>
+    <string name="gesture_actions_title">Customize Gesture Actions</string>
+    <string name="gesture_actions_desc">Choose exactly what each gesture does — close, dismiss, launch apps or disable them</string>
+    <string name="gesture_swipe_up_action_title">Swipe Up (Expanded Card)</string>
+    <string name="gesture_swipe_up_action_desc">Action when flicking up on the expanded card</string>
+    <string name="gesture_hold_swipe_up_action_title">Hold + Swipe Up</string>
+    <string name="gesture_hold_swipe_up_action_desc">Action when holding 300ms then swiping up (clear-all)</string>
+    <string name="gesture_swipe_down_action_title">Swipe Down (Expanded Card)</string>
+    <string name="gesture_swipe_down_action_desc">Action when dragging down on the expanded card</string>
+    <string name="gesture_tap_action_title">Tap (Collapsed Pill)</string>
+    <string name="gesture_tap_action_desc">Action when tapping the collapsed pill</string>
+    <string name="gesture_action_dismiss">Dismiss current notification</string>
+    <string name="gesture_action_dismiss_all">Dismiss all notifications</string>
+    <string name="gesture_action_collapse">Just close (collapse)</string>
+    <string name="gesture_action_floating_window">Open floating window</string>
+    <string name="gesture_action_toggle">Expand / collapse</string>
+    <string name="gesture_action_none">Nothing (disabled)</string>
+    <string name="idle_tap_behavior_title">Idle Tap Behavior</string>
+    <string name="idle_tap_behavior_desc">Choose what opens when you tap the pill with no active notifications</string>
+    <string name="idle_tap_mode_apps">App Shortcuts</string>
+    <string name="idle_tap_mode_info">Info Menu</string>
+    <string name="idle_info_time_title">Show Time &amp; Date</string>
+    <string name="idle_info_battery_title">Show Battery Level</string>
+    <string name="idle_info_bluetooth_title">Show Bluetooth Status</string>
+    <string name="idle_info_hotspot_title">Show Hotspot Status</string>
 
     <!-- Notifications & Privacy Rules -->
     <string name="oem_rules_title">Device Profile &amp; OEM Rules</string>
@@ -267,6 +298,8 @@
     <string name="toggle_quick_actions_desc">Show actionable buttons like Reply, Mark Read, and Dismiss in expanded card</string>
     <string name="toggle_mirror_only_title">Mirror Only (Hide from System Shade)</string>
     <string name="toggle_mirror_only_desc">Show notification only in Smart Island and hide from default notification shade</string>
+    <string name="toggle_hide_shade_open_title">Hide When Status Bar Shade is Open</string>
+    <string name="toggle_hide_shade_open_desc">Temporarily hide the island while the notification shade is pulled down</string>
     <string name="toggle_auto_hide_idle_title">Auto-Hide Pill When Idle</string>
     <string name="toggle_auto_hide_idle_desc">Hide the pill completely when there are no active alerts, music, or dynamic events</string>
     <string name="toggle_auto_hide_pill_title">Auto-Hide Pill After Inactivity</string>
