@@ -29,6 +29,9 @@ import android.widget.Toast
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.ViewCompositionStrategy
 import android.accessibilityservice.AccessibilityService
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
+import android.animation.ValueAnimator
 import android.view.accessibility.AccessibilityEvent
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.setViewTreeLifecycleOwner
@@ -43,7 +46,10 @@ import com.agupta07505.smartisland.data.SmartIslandSettingsRepository
 import com.agupta07505.smartisland.model.IslandNotification
 import com.agupta07505.smartisland.ui.IslandViewModel
 import com.agupta07505.smartisland.ui.OverlayIsland
+import com.agupta07505.smartisland.ui.expanded.IDLE_ITEM_BT_TETHERING
+import com.agupta07505.smartisland.ui.expanded.IDLE_ITEM_USB_TETHERING
 import com.agupta07505.smartisland.ui.expanded.sendIntentWithOptions
+import com.agupta07505.smartisland.util.HotspotUtil
 import com.agupta07505.smartisland.util.ShizukuManager
 import com.agupta07505.smartisland.util.runCatchingLogged
 import com.agupta07505.smartisland.util.runSuspendCatchingLogged
@@ -83,6 +89,24 @@ class SmartIslandOverlayService : AccessibilityService() {
     @Volatile private var suppressShadeHide: Boolean = false
     private var collapseJob: kotlinx.coroutines.Job? = null
     private var lastParams: WindowManager.LayoutParams? = null
+    // Expanded→collapsed window transition glide (see
+    // startCollapseWindowGlide): animates the narrow window's x offset and
+    // width while the Compose tree tracks the x per frame via
+    // windowCenterOffsetFlow, so the window resize can never jump the visible
+    // island sideways.
+    private var collapseWindowAnimator: ValueAnimator? = null
+    // The params a running glide is heading to (null when idle). Needed because
+    // lastParams is mutated in place mid-glide, so comparing it against the
+    // target can't tell whether a glide is already en route.
+    private var collapseWindowGlideTarget: WindowGlideTarget? = null
+
+    private data class WindowGlideTarget(
+        val x: Int,
+        val w: Int,
+        val h: Int,
+        val flags: Int,
+        val softInputMode: Int
+    )
     // dp offset of the ACTUAL overlay window center from the screen center,
     // published for the Compose tree (OverlayIsland -> IslandOverlayView.
     // windowCenterOffsetDp). 0f whenever the window is full-width (expanded, or
@@ -478,6 +502,10 @@ class SmartIslandOverlayService : AccessibilityService() {
         destroyed = true
         isSystemConnected = false
         serviceScope.cancel()
+        // The glide runs on the main-thread choreographer, not serviceScope.
+        collapseWindowAnimator?.cancel()
+        collapseWindowAnimator = null
+        collapseWindowGlideTarget = null
 
         if (::systemEventReceiver.isInitialized && systemEventReceiverRegistered) {
             runCatchingLogged(TAG, "unregisterReceiver failed") {
@@ -742,6 +770,11 @@ class SmartIslandOverlayService : AccessibilityService() {
     private fun updateWindowLayoutParams(expanded: Boolean, settings: SmartIslandSettings) {
         if (destroyed || !::windowManager.isInitialized || !::viewModel.isInitialized) return
         val view = islandView ?: return
+        // Expanding (or switching to a full-width window) abandons any running
+        // collapse glide; the expanded branch below applies its params directly.
+        if (expanded || isTouchableRegionSupported) {
+            collapseWindowAnimator?.cancel()
+        }
         val density = resources.displayMetrics.density
         val screenWidthPx = resources.displayMetrics.widthPixels.toFloat()
         
@@ -795,8 +828,13 @@ class SmartIslandOverlayService : AccessibilityService() {
         // or touchableRegion supported), otherwise the narrow window's x offset
         // (its center is screenCenter + windowXPx). StateFlow dedups equal
         // values, so re-publishing the same value here is a no-op.
-        windowCenterOffsetFlow.value =
-            if (expanded || isTouchableRegionSupported) 0f else windowXPx / density
+        // While a collapse glide is running it owns this flow with per-frame
+        // values — publishing the final target here would jump the Compose
+        // compensation to the end position while the window is still halfway.
+        if (collapseWindowAnimator?.isRunning != true) {
+            windowCenterOffsetFlow.value =
+                if (expanded || isTouchableRegionSupported) 0f else windowXPx / density
+        }
 
         val h = if (expanded) {
             if (!isTouchableRegionSupported) {
@@ -855,6 +893,51 @@ class SmartIslandOverlayService : AccessibilityService() {
             return
         }
 
+        // A collapse glide is already heading to these exact params: let it
+        // finish instead of snapping to the target from its mid-flight frame.
+        val runningGlideTarget = WindowGlideTarget(
+            currentX, w, h, currentFlags, currentSoftInputMode
+        )
+        if (collapseWindowAnimator?.isRunning == true &&
+            collapseWindowGlideTarget == runningGlideTarget
+        ) {
+            return
+        }
+
+        // Expanded→collapsed transition on a narrow-window device: glide the
+        // window to the pill group instead of stepping it. An instant x step
+        // here is the "end-of-collapse left snap": the Compose compensation
+        // frame becomes visible before the resized window frame does, so the
+        // whole island flashes (oldWindowCenter − newWindowCenter) sideways
+        // and then corrects when the resize lands.
+        if (!expanded &&
+            !isTouchableRegionSupported &&
+            currentX != 0 &&
+            lp != null &&
+            lp.x == 0 &&
+            lp.width != w
+        ) {
+            startCollapseWindowGlide(
+                view = view,
+                targetX = currentX,
+                targetW = w,
+                targetH = h,
+                flags = currentFlags,
+                softInputMode = currentSoftInputMode,
+                density = density
+            )
+            return
+        }
+
+        // Not a glide transition (or the glide target changed mid-flight):
+        // abandon any running glide — an animator still mutating lp.x must not
+        // fight the instant apply below. The flow publish at the top was
+        // skipped for the running glide, so re-publish the target here before
+        // the relayout lands.
+        collapseWindowAnimator?.cancel()
+        windowCenterOffsetFlow.value =
+            if (expanded || isTouchableRegionSupported) 0f else windowXPx / density
+
         val params = WindowManager.LayoutParams(
             w,
             h,
@@ -873,6 +956,96 @@ class SmartIslandOverlayService : AccessibilityService() {
         }
     }
 
+    /**
+     * Glides the overlay window from its centered (expanded) geometry to the
+     * narrow collapsed one over ~[COLLAPSE_WINDOW_GLIDE_MS] instead of stepping
+     * it, while the Compose tree tracks the moving window center per frame via
+     * [windowCenterOffsetFlow]. The content is screen-anchored
+     * (renderedX = windowCenter + (target − windowCenterOffset)), so when both
+     * sides advance together the island never moves on screen — and because the
+     * window center changes only by one glide step per frame, even a one-frame
+     * skew between the relayout and the Compose recomposition costs a few
+     * pixels, never the full (oldWindowCenter − newWindowCenter) jump.
+     *
+     * x AND width glide together: the window's right edge then only ever moves
+     * outward across the glide (the x gain exceeds the width loss), so the
+     * companion bubbles that are still sliding into their slots at glide start
+     * can never be clipped by the shrinking window. Height/flags adopt their
+     * final values up front — those steps only clip the already-faded expanded
+     * card (the glide starts ~220ms into the collapse; the card fade takes
+     * 190ms) and never displace visible content.
+     */
+    private fun startCollapseWindowGlide(
+        view: android.view.View,
+        targetX: Int,
+        targetW: Int,
+        targetH: Int,
+        flags: Int,
+        softInputMode: Int,
+        density: Float
+    ) {
+        val glideLp = lastParams ?: return
+        collapseWindowAnimator?.cancel()
+        val startX = glideLp.x
+        val startW = glideLp.width
+        // Vertical/flag steps are displacement-free; adopt them now.
+        glideLp.height = targetH
+        glideLp.flags = flags
+        glideLp.softInputMode = softInputMode
+        collapseWindowGlideTarget = WindowGlideTarget(
+            targetX, targetW, targetH, flags, softInputMode
+        )
+        if (startX == targetX && startW == targetW) {
+            windowCenterOffsetFlow.value = targetX / density
+            runCatchingLogged(TAG, "Collapse glide final frame failed") {
+                windowManager.updateViewLayout(view, glideLp)
+            }
+            collapseWindowGlideTarget = null
+            return
+        }
+        // Flow first, relayout second — same ordering as the instant path.
+        windowCenterOffsetFlow.value = startX / density
+        runCatchingLogged(TAG, "Collapse glide first frame failed") {
+            windowManager.updateViewLayout(view, glideLp)
+        }
+        collapseWindowAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = COLLAPSE_WINDOW_GLIDE_MS
+            interpolator = android.view.animation.LinearInterpolator()
+            addUpdateListener { anim ->
+                val f = anim.animatedValue as Float
+                val x = (startX + (targetX - startX) * f).toInt()
+                val w = (startW + (targetW - startW) * f).toInt()
+                if (x == glideLp.x && w == glideLp.width) return@addUpdateListener
+                glideLp.x = x
+                glideLp.width = w
+                windowCenterOffsetFlow.value = x / density
+                runCatchingLogged(TAG, "Collapse glide frame failed") {
+                    windowManager.updateViewLayout(view, glideLp)
+                }
+            }
+            addListener(object : AnimatorListenerAdapter() {
+                private var cancelled = false
+                override fun onAnimationCancel(animation: Animator) {
+                    cancelled = true
+                }
+
+                override fun onAnimationEnd(animation: Animator) {
+                    collapseWindowAnimator = null
+                    collapseWindowGlideTarget = null
+                    if (!cancelled) {
+                        glideLp.x = targetX
+                        glideLp.width = targetW
+                        windowCenterOffsetFlow.value = targetX / density
+                        runCatchingLogged(TAG, "Collapse glide end failed") {
+                            windowManager.updateViewLayout(view, glideLp)
+                        }
+                    }
+                }
+            })
+            start()
+        }
+    }
+
     private fun removeCollapsedWindow() {
         val view = islandView ?: return
         // Clear the reference before removal so repeated teardown calls are harmless,
@@ -882,6 +1055,9 @@ class SmartIslandOverlayService : AccessibilityService() {
         isWindowExpanded = false
         collapseJob?.cancel()
         collapseJob = null
+        collapseWindowAnimator?.cancel()
+        collapseWindowAnimator = null
+        collapseWindowGlideTarget = null
         if (!::windowManager.isInitialized) return
         runCatchingLogged(TAG, "Failed to remove view") {
             if (view.isAttachedToWindow) {
@@ -1128,6 +1304,117 @@ class SmartIslandOverlayService : AccessibilityService() {
     }
 
     /**
+     * Idle-menu tethering toggles (Wi-Fi hotspot, USB tethering, Bluetooth
+     * tethering), same spirit as the Bluetooth row: Shizuku shell command, no
+     * dialogs, no settings pages — the island stays visible and the menu stays
+     * open either way. Best-effort: when a state reader is unavailable the
+     * dispatch result is trusted; when the command fails the user gets in-menu
+     * feedback instead of a Toast or a Settings round-trip.
+     */
+    private fun toggleTetheringViaShizuku(kind: String, label: String) {
+        // Keep the island fully visible; make its window transparent to touches
+        // while the shell command runs (mirrors the Bluetooth toggle path).
+        suppressShadeHide = true
+        if (::viewModel.isInitialized) {
+            updateWindowLayoutParams(isWindowExpanded, viewModel.settings.value)
+        }
+        serviceScope.launch {
+            runSuspendCatchingLogged(TAG, "$label toggle failed") {
+                val before = readTetheringState(kind)
+                val target = before != true
+                if (::viewModel.isInitialized) {
+                    viewModel.postMenuFeedback(
+                        if (before == true) "Turning $label off…" else "Turning $label on…"
+                    )
+                }
+                val dispatched = if (ShizukuManager.isBinderAvailable()) {
+                    ShizukuManager.toggleTethering(kind, target)
+                } else {
+                    Result.failure(
+                        IllegalStateException("Shizuku binder offline (installed=${ShizukuManager.isInstalled(this@SmartIslandOverlayService)})")
+                    )
+                }
+                // Verify with the best reader available. null = no reliable
+                // reader on this device → trust the dispatch (optimistic).
+                val verified = if (dispatched.isSuccess) {
+                    waitForTetheringState(kind, target, TETHERING_TOGGLE_VERIFY_TIMEOUT_MS)
+                } else {
+                    null
+                }
+                val changed = when {
+                    dispatched.isFailure -> false
+                    verified == null -> true
+                    else -> verified == target
+                }
+                if (::viewModel.isInitialized) {
+                    if (changed) {
+                        viewModel.postMenuFeedback(if (target) "$label on" else "$label off")
+                        // The info menu stays open behind the toggle; restart
+                        // the auto-collapse window so the menu does not linger.
+                        viewModel.resetAutoCollapseTimer()
+                    } else {
+                        viewModel.postMenuFeedback("Couldn't toggle $label")
+                    }
+                }
+                android.util.Log.d(
+                    TAG,
+                    "Tethering toggle $kind: dispatched=${dispatched.isSuccess} " +
+                        "verified=$verified (reason=${dispatched.exceptionOrNull()?.message ?: "ok"})"
+                )
+            }
+            // Always restore touch handling, even if the block above threw.
+            suppressShadeHide = false
+            if (::viewModel.isInitialized) {
+                updateWindowLayoutParams(isWindowExpanded, viewModel.settings.value)
+            }
+        }
+    }
+
+    /**
+     * Best-effort tethering state reader. Returns true/false when readable,
+     * null when this device offers no reliable read (e.g. Bluetooth tethering,
+     * whose PAN state is a hidden, permission-guarded API).
+     */
+    private fun readTetheringState(kind: String): Boolean? = when (kind) {
+        "wifi" -> HotspotUtil.isHotspotActive(this)
+        "usb" -> isUsbTetheringActive()
+        else -> null
+    }
+
+    /**
+     * Permission-free USB tethering probe: enabling USB tethering brings up the
+     * rndis0/usb0 network interface. Returns false when neither interface is
+     * up; the caller pairs this with an optimistic dispatch result.
+     */
+    private fun isUsbTetheringActive(): Boolean = runCatching {
+        val interfaces = java.net.NetworkInterface.getNetworkInterfaces() ?: return false
+        interfaces.toList().any {
+            (it.name == "rndis0" || it.name == "usb0") && it.isUp
+        }
+    }.getOrDefault(false)
+
+    /**
+     * Polls [readTetheringState] until the tethering state reaches [target] or
+     * [timeoutMs] elapses. Returns null as soon as the reader turns out to be
+     * unavailable on this device (nothing to wait for — the caller then trusts
+     * the dispatch result instead).
+     */
+    private suspend fun waitForTetheringState(
+        kind: String,
+        target: Boolean,
+        timeoutMs: Long
+    ): Boolean? {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            val state = readTetheringState(kind)
+            if (state == target) return target
+            if (state == null) return null
+            delay(200L)
+        }
+        return readTetheringState(kind)
+    }
+
+    /**
      * QS-tile fallback toggle. Returns true when the state actually flipped.
      * Opens QS, taps the Bluetooth tile (retrying and scrolling the tile
      * carousel as needed) and closes QS again via BACK — but only if QS was
@@ -1320,8 +1607,20 @@ class SmartIslandOverlayService : AccessibilityService() {
                     toggleBluetoothViaShade()
                 }
                 "hotspot" -> {
-                    openedSomething = true
-                    com.agupta07505.smartisland.util.HotspotUtil.openHotspotSettings(this)
+                    // Toggle the Wi-Fi hotspot in place (Shizuku shell command)
+                    // instead of opening the hotspot settings page — same
+                    // spirit as the Bluetooth row: no dialogs, no settings
+                    // pages, island stays visible, menu stays open.
+                    openedSomething = false
+                    toggleTetheringViaShizuku(kind = "wifi", label = "Hotspot")
+                }
+                IDLE_ITEM_USB_TETHERING -> {
+                    openedSomething = false
+                    toggleTetheringViaShizuku(kind = "usb", label = "USB tethering")
+                }
+                IDLE_ITEM_BT_TETHERING -> {
+                    openedSomething = false
+                    toggleTetheringViaShizuku(kind = "bluetooth", label = "BT tethering")
                 }
             }
         }
@@ -1513,6 +1812,13 @@ class SmartIslandOverlayService : AccessibilityService() {
         private const val OVERLAY_CHANNEL_ID = "smart_island_overlay"
         private const val OVERLAY_CHANNEL_NAME = "Smart Island overlay"
         private const val AUTO_COLLAPSE_DELAY_MS = 220L
+        // How long a tethering toggle waits for the system state to confirm
+        // before falling back to the (optimistic) dispatch result.
+        private const val TETHERING_TOGGLE_VERIFY_TIMEOUT_MS = 4000L
+        // Duration of the expanded→collapsed window x glide (see
+        // startCollapseWindowGlide). Short enough to end with the collapse
+        // spring, long enough that the per-frame window steps are invisible.
+        private const val COLLAPSE_WINDOW_GLIDE_MS = 200L
         private const val EXPANDED_WINDOW_WIDTH_RATIO = 0.95f
     }
 

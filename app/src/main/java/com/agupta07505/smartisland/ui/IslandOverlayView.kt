@@ -774,10 +774,13 @@ fun IslandOverlayView(
                     },
                 contentAlignment = Alignment.Center
             ) {
-                IslandCollapsedContent(
-                    mode = tertiaryNotification.mode,
+                // Icon-only content for the companion circle. The full collapsed
+                // glyph (IslandCollapsedContent) also renders the right-slot
+                // DATA text (timer countdown, battery %, call timer, …), which
+                // is unreadable noise inside a circleSize bubble — the main
+                // pill keeps the full glyph with data.
+                SecondaryBubbleContent(
                     notification = tertiaryNotification,
-                    collapsedAlpha = 1f,
                     settings = settings
                 )
             }

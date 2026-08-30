@@ -29,6 +29,7 @@ import androidx.compose.material.icons.rounded.BatteryChargingFull
 import androidx.compose.material.icons.rounded.Bluetooth
 import androidx.compose.material.icons.rounded.BluetoothConnected
 import androidx.compose.material.icons.rounded.Schedule
+import androidx.compose.material.icons.rounded.Usb
 import androidx.compose.material.icons.rounded.WifiTethering
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -60,7 +61,9 @@ private data class IdleDeviceState(
     val batteryCharging: Boolean,
     val bluetoothText: String,
     val bluetoothOn: Boolean,
-    val hotspotText: String
+    val hotspotText: String,
+    val usbTetheringText: String,
+    val btTetheringText: String
 )
 
 @Composable
@@ -70,9 +73,12 @@ fun IdleInfoExpanded(
     feedback: String? = null
 ) {
     val context = LocalContext.current
-    // Battery/BT/hotspot reads are binder + reflection calls; run them on IO so
-    // the 1s menu refresh never janks the overlay's main thread.
-    val state by produceState(initialValue = IdleDeviceState("", "", "", false, "", false, "")) {
+    // Battery/BT/hotspot/tethering reads are binder + reflection + interface
+    // probes; run them on IO so the 1s menu refresh never janks the overlay's
+    // main thread.
+    val state by produceState(
+        initialValue = IdleDeviceState("", "", "", false, "", false, "", "", "")
+    ) {
         while (true) {
             value = withContext(Dispatchers.IO) { readDeviceState(context) }
             delay(1000L)
@@ -141,10 +147,32 @@ fun IdleInfoExpanded(
             )
         }
 
+        if (settings.idleInfoShowUsbTethering) {
+            IdleInfoRow(
+                icon = Icons.Rounded.Usb,
+                iconColor = if (state.usbTetheringText.startsWith("On")) Color(0xFF10B981) else Color(0xFF94A3B8),
+                label = "USB Tethering",
+                value = state.usbTetheringText,
+                onClick = { onItemClick(IDLE_ITEM_USB_TETHERING) }
+            )
+        }
+
+        if (settings.idleInfoShowBtTethering) {
+            IdleInfoRow(
+                icon = if (state.bluetoothOn) Icons.Rounded.BluetoothConnected else Icons.Rounded.Bluetooth,
+                iconColor = if (state.btTetheringText.startsWith("On")) Color(0xFF2563EB) else Color(0xFF94A3B8),
+                label = "Bluetooth Tethering",
+                value = state.btTetheringText,
+                onClick = { onItemClick(IDLE_ITEM_BT_TETHERING) }
+            )
+        }
+
         if (!settings.idleInfoShowTime &&
             !settings.idleInfoShowBattery &&
             !settings.idleInfoShowBluetooth &&
-            !settings.idleInfoShowHotspot
+            !settings.idleInfoShowHotspot &&
+            !settings.idleInfoShowUsbTethering &&
+            !settings.idleInfoShowBtTethering
         ) {
             Text(
                 text = "All info items are disabled",
@@ -172,6 +200,11 @@ const val IDLE_ITEM_TIME = "time"
 const val IDLE_ITEM_BATTERY = "battery"
 const val IDLE_ITEM_BLUETOOTH = "bluetooth"
 const val IDLE_ITEM_HOTSPOT = "hotspot"
+const val IDLE_ITEM_USB_TETHERING = "usb_tethering"
+const val IDLE_ITEM_BT_TETHERING = "bt_tethering"
+
+/** Row value shown when a tethering state cannot be read on this device. */
+private const val TAP_TO_TOGGLE = "Tap to toggle"
 
 @Composable
 private fun InfoIconBadge(icon: ImageVector, color: Color) {
@@ -277,10 +310,26 @@ private fun readDeviceState(context: Context): IdleDeviceState {
 
     var hotspotText = "Off"
     runCatching {
-        if (HotspotUtil.isHotspotActive(context) == true) {
-            hotspotText = "On"
+        val active = HotspotUtil.isHotspotActive(context)
+        when (active) {
+            true -> hotspotText = "On"
+            null -> hotspotText = TAP_TO_TOGGLE
+            false -> hotspotText = "Off"
         }
     }
+
+    // USB tethering brings up the rndis0/usb0 interface — a permission-free,
+    // reliable read. When the probe cannot run at all, show "Tap to toggle".
+    val usbTetheringText = runCatching {
+        val up = java.net.NetworkInterface.getNetworkInterfaces()
+            ?.toList()
+            ?.any { (it.name == "rndis0" || it.name == "usb0") && it.isUp } == true
+        if (up) "On" else "Off"
+    }.getOrDefault(TAP_TO_TOGGLE)
+
+    // Bluetooth tethering (PAN) state is a hidden, permission-guarded API with
+    // no permission-free read — show the best available state instead.
+    val btTetheringText = TAP_TO_TOGGLE
 
     return IdleDeviceState(
         timeText = timeText,
@@ -289,6 +338,8 @@ private fun readDeviceState(context: Context): IdleDeviceState {
         batteryCharging = batteryCharging,
         bluetoothText = bluetoothText,
         bluetoothOn = bluetoothOn,
-        hotspotText = hotspotText
+        hotspotText = hotspotText,
+        usbTetheringText = usbTetheringText,
+        btTetheringText = btTetheringText
     )
 }

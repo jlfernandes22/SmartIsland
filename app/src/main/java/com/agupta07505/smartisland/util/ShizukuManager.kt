@@ -236,4 +236,40 @@ object ShizukuManager {
             listOf("cmd bluetooth_manager $action || svc bluetooth $action")
         ).map { true }
     }
+
+    /**
+     * Toggles a tethering type with shell-level privileges via Shizuku.
+     *
+     * Uses the ConnectivityService shell interface (Android 13+):
+     *   `cmd connectivity tethering <kind> <enable|disable>`
+     * where kind is one of "wifi", "usb" or "bluetooth". `shell` uid holds the
+     * NETWORK_SETTINGS/TETHER_PRIVILEGED-like permissions the tethering shell
+     * command checks, so this works where a normal app's TetheringManager calls
+     * would need a full Settings page round-trip.
+     *
+     * Best-effort by design: some OEM builds may not expose the shell command,
+     * in which case the returned Result fails and the caller shows in-menu
+     * feedback (no dialogs, no settings pages — the island stays untouched).
+     *
+     * @param kind "wifi" (Wi-Fi hotspot), "usb" (USB tethering) or "bluetooth"
+     *        (Bluetooth tethering).
+     * @return success when the command exited cleanly. Callers SHOULD still
+     *         verify the actual state change with whatever reader is available.
+     */
+    suspend fun toggleTethering(kind: String, enable: Boolean): Result<Boolean> =
+        withContext(Dispatchers.IO) {
+            if (!isBinderAvailable() || !hasPermission()) {
+                return@withContext Result.failure(
+                    IllegalStateException("Shizuku binder offline or API permission not granted")
+                )
+            }
+            require(kind in TETHERING_KINDS) { "Unknown tethering kind: $kind" }
+            val action = if (enable) "enable" else "disable"
+            runShizukuCommands(
+                listOf("cmd connectivity tethering $kind $action")
+            ).map { true }
+        }
+
+    /** Valid [toggleTethering] kinds, mirroring the shell command's types. */
+    val TETHERING_KINDS = setOf("wifi", "usb", "bluetooth")
 }
