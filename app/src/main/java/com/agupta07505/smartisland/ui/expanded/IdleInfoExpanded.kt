@@ -15,6 +15,7 @@ import android.os.BatteryManager
 import android.os.Build
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -63,7 +64,8 @@ private data class IdleDeviceState(
 @Composable
 fun IdleInfoExpanded(
     settings: SmartIslandSettings,
-    onItemClick: (String) -> Unit = {}
+    onItemClick: (String) -> Unit = {},
+    feedback: String? = null
 ) {
     val context = LocalContext.current
     val state by produceState(initialValue = IdleDeviceState("", "", "", false, "", false, "")) {
@@ -144,6 +146,19 @@ fun IdleInfoExpanded(
                 text = "All info items are disabled",
                 color = Color(0xFFB7C0CA),
                 fontSize = 13.sp
+            )
+        }
+
+        // In-island action feedback (e.g. "Bluetooth on", "Turning Bluetooth…"):
+        // the test device suppresses Toasts for this app, so results are shown
+        // here instead. Rendered last so the rows never shift position.
+        if (feedback != null) {
+            Text(
+                text = feedback,
+                color = Color(0xFF67E8F9),
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.animateContentSize()
             )
         }
     }

@@ -8,8 +8,8 @@
 package com.agupta07505.smartisland.ui
 
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.runtime.Composable
@@ -17,6 +17,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
@@ -26,16 +27,22 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Fill
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.changedToUp
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlin.math.cos
 import kotlin.math.sin
 
@@ -69,35 +76,81 @@ fun WavyMusicSeekBar(
     val activeProgress = if (isDragging) dragProgress else progress
 
     val density = LocalDensity.current
+    val haptic = LocalHapticFeedback.current
+    val scope = rememberCoroutineScope()
     Canvas(
         modifier = modifier
             .fillMaxWidth()
             .height(24.dp)
+            // Gesture arbitration with the enclosing HorizontalPager (and the
+            // pill's vertical drag handler):
+            // - Tap: seek/jump to the tapped position.
+            // - Press-and-hold (SCRUB_HOLD_DELAY_MS), then drag: deliberate
+            //   scrub; the gesture is claimed so the pager cannot steal it.
+            // - Any quick drag before the hold elapses: NOT consumed, so the
+            //   card pages (or the pill's swipe gestures run) reliably. This
+            //   is what makes horizontal card swipes reach the info page
+            //   while music is playing.
             .pointerInput(Unit) {
-                detectTapGestures { offset ->
-                    val newProgress = (offset.x / size.width.toFloat()).coerceIn(0f, 1f)
-                    dragProgress = newProgress
-                    onSeek(newProgress)
-                }
-            }
-            .pointerInput(Unit) {
-                detectDragGestures(
-                    onDragStart = { offset ->
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    var scrubStarted = false
+                    var tapCandidate = true
+
+                    fun progressAt(x: Float): Float =
+                        (x / size.width.toFloat()).coerceIn(0f, 1f)
+
+                    val holdJob = scope.launch {
+                        delay(SCRUB_HOLD_DELAY_MS)
+                        scrubStarted = true
                         isDragging = true
-                        dragProgress = (offset.x / size.width.toFloat()).coerceIn(0f, 1f)
-                    },
-                    onDrag = { change, _ ->
-                        change.consume()
-                        dragProgress = (change.position.x / size.width.toFloat()).coerceIn(0f, 1f)
-                    },
-                    onDragEnd = {
-                        isDragging = false
-                        onSeek(dragProgress)
-                    },
-                    onDragCancel = {
-                        isDragging = false
+                        dragProgress = progressAt(down.position.x)
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                     }
-                )
+
+                    try {
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val change = event.changes.firstOrNull { it.id == down.id } ?: break
+
+                            if (change.changedToUp()) {
+                                change.consume()
+                                holdJob.cancel()
+                                if (scrubStarted) {
+                                    isDragging = false
+                                    onSeek(dragProgress)
+                                } else if (tapCandidate) {
+                                    dragProgress = progressAt(change.position.x)
+                                    onSeek(dragProgress)
+                                }
+                                break
+                            }
+
+                            if (scrubStarted) {
+                                // Deliberate scrub in progress: claim the pointer
+                                // so the pager cannot steal the gesture mid-drag.
+                                change.consume()
+                                dragProgress = progressAt(change.position.x)
+                            } else if (change.isConsumed) {
+                                // Someone else (pager, pill handler) claimed the
+                                // pointer first — stay out of the way.
+                                holdJob.cancel()
+                                tapCandidate = false
+                                break
+                            } else if (change.positionChange().getDistance() >
+                                viewConfiguration.touchSlop
+                            ) {
+                                // Moved before the hold elapsed: release the
+                                // gesture to the pager / pill handlers untouched.
+                                holdJob.cancel()
+                                tapCandidate = false
+                                break
+                            }
+                        }
+                    } finally {
+                        holdJob.cancel()
+                    }
+                }
             }
     ) {
         val width = size.width
@@ -192,4 +245,5 @@ fun WavyMusicSeekBar(
 private val WAVE_FADE_WIDTH = 24.dp
 private const val WAVE_FREQ_1 = 0.04f
 private const val WAVE_FREQ_2 = 0.02f
+private const val SCRUB_HOLD_DELAY_MS = 220L
 

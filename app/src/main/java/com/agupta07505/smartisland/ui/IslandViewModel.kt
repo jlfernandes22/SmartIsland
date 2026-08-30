@@ -65,6 +65,19 @@ class IslandViewModel(
     val isLocked = MutableStateFlow(false)
     val isInputActive = MutableStateFlow(false)
 
+    // Transient feedback rendered INSIDE the expanded island (e.g. by the idle
+    // info menu). The test device suppresses Toasts for this app, so actions
+    // like the Bluetooth toggle report their result here instead.
+    val menuFeedback = MutableStateFlow<String?>(null)
+    private var menuFeedbackJob: Job? = null
+
+    // Increments every time the overlay returns from GONE to VISIBLE (app
+    // closed, shade closed, unlock, back to launcher). The overlay plays a
+    // spring scale-in on each tick, faking the reverse "app shrinks back into
+    // the island" transition that Android does not allow third-party apps to
+    // perform on another app's window.
+    val reappearTick = MutableStateFlow(0)
+
     val mode: StateFlow<IslandMode> = combine(visibleNotifications, selectedIndex) { list, idx ->
         list.getOrNull(idx)?.mode ?: IslandMode.Empty
     }.stateIn(
@@ -129,6 +142,20 @@ class IslandViewModel(
                 }
             }
         }
+    }
+
+    /** Shows a short-lived message inside the expanded island (no Toasts). */
+    fun postMenuFeedback(message: String) {
+        menuFeedbackJob?.cancel()
+        menuFeedbackJob = viewModelScope.launch {
+            menuFeedback.value = message
+            delay(2500)
+            menuFeedback.value = null
+        }
+    }
+
+    fun notifyIslandReappeared() {
+        reappearTick.value += 1
     }
 
     fun expand() {

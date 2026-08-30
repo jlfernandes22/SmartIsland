@@ -45,6 +45,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.Alignment
@@ -98,7 +99,10 @@ fun IslandOverlayView(
     onReplyStateChanged: (Boolean) -> Unit = {},
     onDismissAllNotifications: () -> Unit = {},
     isFullWidth: Boolean = true,
-    onOpenIdleInfoItem: (String) -> Unit = {}
+    onOpenIdleInfoItem: (String) -> Unit = {},
+    menuFeedback: String? = null,
+    reappearTick: Int = 0,
+    onExpandedWindowContentSize: (Int, Int) -> Unit = { _, _ -> }
 ) {
     // Fix #1: rememberUpdatedState ensures the lambda is always fresh
     // even though pointerInput(Unit) never restarts its coroutine
@@ -277,6 +281,41 @@ fun IslandOverlayView(
                     dampingRatio = Spring.DampingRatioMediumBouncy,
                     stiffness = 650f
                 )
+            )
+        }
+    }
+
+    // Reverse "app shrinks back into the island" illusion: the service bumps
+    // reappearTick when the island returns (app closed, home, unlock). The pill
+    // then springs in from ~half size at the punch hole. Android provides no
+    // API to animate another app's window exit, so this replay is the closest
+    // supported effect (docs/BLUETOOTH_TOGGLE_AND_UI_NOTES.md).
+    LaunchedEffect(reappearTick) {
+        if (reappearTick > 0) {
+            switchScaleAnim.snapTo(0.55f)
+            switchScaleAnim.animateTo(
+                targetValue = 1f,
+                animationSpec = spring(
+                    dampingRatio = Spring.DampingRatioMediumBouncy,
+                    stiffness = 620f
+                )
+            )
+        }
+    }
+
+    // Report the measured expanded content size so the service can size the
+    // overlay window to the card on devices without the touchableRegion API
+    // (touch passthrough). Runs on every recomposition while expanded; the
+    // service deduplicates and the height is ceiling-quantized to an 8dp grid
+    // to avoid window relayouts on every frame while swiping between pages
+    // with different card heights.
+    if (expanded && !isFullWidth) {
+        val contentHeight = expandedTopOffset + expandedHeight + 32.dp
+        val quantizedHeightDp = (kotlin.math.ceil(contentHeight.value / 8f) * 8f).dp
+        SideEffect {
+            onExpandedWindowContentSize(
+                with(density) { expandedWidth.roundToPx() },
+                with(density) { quantizedHeightDp.roundToPx() }
             )
         }
     }
@@ -594,7 +633,8 @@ fun IslandOverlayView(
                         settings = settings,
                         onReplyStateChanged = onReplyStateChanged,
                         onOpenIdleInfoItem = onOpenIdleInfoItem,
-                        onInfoPageActive = { infoPageActive = it }
+                        onInfoPageActive = { infoPageActive = it },
+                        menuFeedback = menuFeedback
                     )
                 }
             }

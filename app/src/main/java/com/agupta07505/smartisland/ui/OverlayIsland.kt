@@ -29,7 +29,8 @@ fun OverlayIsland(
     onOpenFloatingWindow: () -> Unit,
     modifier: Modifier = Modifier,
     isFullWidth: Boolean = true,
-    onOpenIdleInfoItem: (String) -> Unit = {}
+    onOpenIdleInfoItem: (String) -> Unit = {},
+    onExpandedWindowContentSize: (Int, Int) -> Unit = { _, _ -> }
 ) {
     val settings by viewModel.settings.collectAsState()
     val expanded by viewModel.expanded.collectAsState()
@@ -37,6 +38,8 @@ fun OverlayIsland(
     val selectedIndex by viewModel.selectedIndex.collectAsState()
     val isLocked by viewModel.isLocked.collectAsState()
     val isInputActive by viewModel.isInputActive.collectAsState()
+    val menuFeedback by viewModel.menuFeedback.collectAsState()
+    val reappearTick by viewModel.reappearTick.collectAsState()
     val context = LocalContext.current
 
     val isContentRedacted = isLocked && settings.lockScreenPrivacy == "AppIconOnly"
@@ -98,6 +101,9 @@ fun OverlayIsland(
         onReplyStateChanged = { viewModel.setInputActive(it) },
         isFullWidth = isFullWidth,
         onOpenIdleInfoItem = onOpenIdleInfoItem,
+        menuFeedback = menuFeedback,
+        reappearTick = reappearTick,
+        onExpandedWindowContentSize = onExpandedWindowContentSize,
         modifier = modifier
     )
 }

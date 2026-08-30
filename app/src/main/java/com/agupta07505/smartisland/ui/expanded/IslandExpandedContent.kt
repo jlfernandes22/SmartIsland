@@ -68,7 +68,8 @@ fun IslandExpandedContent(
     modifier: Modifier = Modifier,
     onReplyStateChanged: (Boolean) -> Unit = {},
     onOpenIdleInfoItem: (String) -> Unit = {},
-    onInfoPageActive: (Boolean) -> Unit = {}
+    onInfoPageActive: (Boolean) -> Unit = {},
+    menuFeedback: String? = null
 ) {
     if (notifications.isEmpty()) {
         val density = LocalDensity.current
@@ -246,7 +247,11 @@ fun IslandExpandedContent(
                                 }
                             }
                     ) {
-                        IdleInfoExpanded(settings = settings, onItemClick = onOpenIdleInfoItem)
+                        IdleInfoExpanded(
+                            settings = settings,
+                            onItemClick = onOpenIdleInfoItem,
+                            feedback = menuFeedback
+                        )
                     }
                 } else {
                     val notification = notifications.getOrNull(page - pagerOffset)
@@ -358,7 +363,8 @@ fun IslandExpandedContent(
                                 settings = settings,
                                 apps = launcherApps,
                                 onLaunchApp = onLaunchApp,
-                                onOpenIdleInfoItem = onOpenIdleInfoItem
+                                onOpenIdleInfoItem = onOpenIdleInfoItem,
+                                menuFeedback = menuFeedback
                             )
                         }
                     }
@@ -408,10 +414,15 @@ private fun EmptyExpanded(
     settings: SmartIslandSettings,
     apps: List<LaunchableApp>?,
     onLaunchApp: (String) -> Unit,
-    onOpenIdleInfoItem: (String) -> Unit
+    onOpenIdleInfoItem: (String) -> Unit,
+    menuFeedback: String? = null
 ) {
     if (settings.idleTapMode == com.agupta07505.smartisland.data.SmartIslandSettings.IdleTapModes.INFO) {
-        IdleInfoExpanded(settings = settings, onItemClick = onOpenIdleInfoItem)
+        IdleInfoExpanded(
+            settings = settings,
+            onItemClick = onOpenIdleInfoItem,
+            feedback = menuFeedback
+        )
         return
     }
 

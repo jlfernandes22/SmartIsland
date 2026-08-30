@@ -197,4 +197,31 @@ object ShizukuManager {
         )
         runShizukuCommands(commands)
     }
+
+    /**
+     * Toggles Bluetooth with shell-level privileges via Shizuku.
+     *
+     * On Android 12+ a normal app cannot call BluetoothAdapter.enable()/disable()
+     * (they return false even with BLUETOOTH_CONNECT granted), but the `shell`
+     * uid holds BLUETOOTH_PRIVILEGED. Shizuku therefore dispatches the toggle
+     * through the hidden BluetoothManagerService shell commands:
+     *   1. `cmd bluetooth_manager enable|disable` (Android 11+ shell command)
+     *   2. `svc bluetooth enable|disable` (older, still present on current ROMs)
+     * `||` tries the second only when the first fails. No dialogs, no settings
+     * pages, no shade pull-down — the overlay island stays untouched.
+     *
+     * @return success when the command chain exited cleanly. Callers MUST still
+     * verify the actual state change via Settings.Global "bluetooth_on".
+     */
+    suspend fun toggleBluetooth(enable: Boolean): Result<Boolean> = withContext(Dispatchers.IO) {
+        if (!isBinderAvailable() || !hasPermission()) {
+            return@withContext Result.failure(
+                IllegalStateException("Shizuku binder offline or API permission not granted")
+            )
+        }
+        val action = if (enable) "enable" else "disable"
+        runShizukuCommands(
+            listOf("cmd bluetooth_manager $action || svc bluetooth $action")
+        ).map { true }
+    }
 }

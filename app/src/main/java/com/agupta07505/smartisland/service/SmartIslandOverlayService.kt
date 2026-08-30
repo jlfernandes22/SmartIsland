@@ -44,6 +44,7 @@ import com.agupta07505.smartisland.model.IslandNotification
 import com.agupta07505.smartisland.ui.IslandViewModel
 import com.agupta07505.smartisland.ui.OverlayIsland
 import com.agupta07505.smartisland.ui.expanded.sendIntentWithOptions
+import com.agupta07505.smartisland.util.ShizukuManager
 import com.agupta07505.smartisland.util.runCatchingLogged
 import com.agupta07505.smartisland.util.runSuspendCatchingLogged
 import dagger.hilt.android.AndroidEntryPoint
@@ -80,6 +81,13 @@ class SmartIslandOverlayService : AccessibilityService() {
     @Volatile private var suppressShadeHide: Boolean = false
     private var collapseJob: kotlinx.coroutines.Job? = null
     private var lastParams: WindowManager.LayoutParams? = null
+    // Content-sized expanded window (touch-passthrough fallback): reported by the
+    // Compose tree when the hidden touchableRegion API is unavailable, so the
+    // expanded window can be sized to the card instead of swallowing the screen.
+    @Volatile private var expandedWindowWidthPx: Int = 0
+    @Volatile private var expandedWindowHeightPx: Int = 0
+    private var lastForegroundPackage: String? = null
+    private var launcherPackage: String? = null
 
     private val torchCallback = object : android.hardware.camera2.CameraManager.TorchCallback() {
         override fun onTorchModeChanged(cameraId: String, enabled: Boolean) {
@@ -167,6 +175,26 @@ class SmartIslandOverlayService : AccessibilityService() {
             if (event?.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
                 val openedPackage = event.packageName?.toString()
                 val openedClass = event.className?.toString() ?: ""
+
+                // Reverse "app shrinks into the island" illusion: whenever the
+                // launcher comes back to the foreground (app closed / home
+                // pressed) and the island is collapsed, replay a spring
+                // scale-in from the punch hole. A third-party app cannot animate
+                // another app's window exit, so this replay is the closest
+                // supported effect (see docs/BLUETOOTH_TOGGLE_AND_UI_NOTES.md).
+                if (!openedPackage.isNullOrEmpty() && openedPackage != packageName) {
+                    val launcher = launcherPackage ?: resolveLauncherPackage().also { launcherPackage = it }
+                    if (launcher != null &&
+                        openedPackage == launcher &&
+                        lastForegroundPackage != launcher &&
+                        ::viewModel.isInitialized &&
+                        !viewModel.expanded.value
+                    ) {
+                        viewModel.notifyIslandReappeared()
+                    }
+                    lastForegroundPackage = openedPackage
+                }
+
                 val shadeToggled = if (openedPackage == "com.android.systemui") {
                     isShadeOpen = isNotificationShadeWindow(event)
                     true
@@ -522,8 +550,32 @@ class SmartIslandOverlayService : AccessibilityService() {
                         onLaunchApp = { packageName -> launchApp(packageName) },
                         onOpenFloatingWindow = { openCurrentNotificationInFloatingWindow() },
                         isFullWidth = isTouchableRegionSupported,
-                        onOpenIdleInfoItem = { item -> openIdleInfoItem(item) }
+                        onOpenIdleInfoItem = { item -> openIdleInfoItem(item) },
+                        onExpandedWindowContentSize = { widthPx, heightPx ->
+                            onExpandedWindowContentSizeChanged(widthPx, heightPx)
+                        }
                     )
+                }
+
+                // Supported touch-passthrough for the EXPANDED overlay on devices
+                // where the hidden touchableRegion reflection is blocked: the
+                // window is sized to the island content (see
+                // updateWindowLayoutParams) and FLAG_WATCH_OUTSIDE_TOUCH turns
+                // every tap outside it into an ACTION_OUTSIDE event, which
+                // collapses the island — replacing the old full-screen window's
+                // "tap anywhere outside to dismiss" behaviour.
+                setOnTouchListener { _, event ->
+                    if (event.actionMasked == android.view.MotionEvent.ACTION_OUTSIDE &&
+                        !suppressShadeHide &&
+                        ::viewModel.isInitialized &&
+                        viewModel.expanded.value
+                    ) {
+                        android.util.Log.d(TAG, "Touch outside expanded island window; collapsing")
+                        viewModel.collapse()
+                        true
+                    } else {
+                        false
+                    }
                 }
 
                 setupTouchableRegion(this)
@@ -672,6 +724,15 @@ class SmartIslandOverlayService : AccessibilityService() {
 
         val targetVisibility = if (isHidden) android.view.View.GONE else android.view.View.VISIBLE
         if (view.visibility != targetVisibility) {
+            // GONE -> VISIBLE means the island is coming back (app closed, shade
+            // closed, unlock, ...): let the overlay replay its scale-in
+            // "reappear" animation for the reverse-shrink illusion.
+            if (targetVisibility == android.view.View.VISIBLE &&
+                view.visibility == android.view.View.GONE &&
+                ::viewModel.isInitialized
+            ) {
+                viewModel.notifyIslandReappeared()
+            }
             view.visibility = targetVisibility
         }
 
@@ -689,14 +750,23 @@ class SmartIslandOverlayService : AccessibilityService() {
         val windowXPx = (groupCenterPx - screenWidthPx / 2f).toInt()
 
         val h = if (expanded) {
-            WindowManager.LayoutParams.MATCH_PARENT
+            if (!isTouchableRegionSupported) {
+                // Touch-passthrough fallback: size the window to the expanded
+                // card (reported by the Compose tree) instead of MATCH_PARENT,
+                // so touches on the rest of the screen reach the app underneath.
+                expandedWindowHeightPx.takeIf { it > 0 } ?: estimatedExpandedWindowHeightPx()
+            } else {
+                WindowManager.LayoutParams.MATCH_PARENT
+            }
         } else {
             ((settings.height + 16f) * density).toInt()
         }
-        val w = if (expanded || isTouchableRegionSupported) {
-            WindowManager.LayoutParams.MATCH_PARENT
-        } else {
-            (groupWidthPx + 32f * density).toInt()
+        val w = when {
+            expanded && !isTouchableRegionSupported ->
+                expandedWindowWidthPx.takeIf { it > 0 }
+                    ?: (screenWidthPx * EXPANDED_WINDOW_WIDTH_RATIO).toInt()
+            expanded || isTouchableRegionSupported -> WindowManager.LayoutParams.MATCH_PARENT
+            else -> (groupWidthPx + 32f * density).toInt()
         }
         val isInput = viewModel.isInputActive.value && expanded
         val focusFlags = if (isInput) 0 else WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
@@ -705,8 +775,16 @@ class SmartIslandOverlayService : AccessibilityService() {
             WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
             WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
             WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED or
-            (if (suppressShadeHide) WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE else 0)
+            (if (suppressShadeHide) WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE else 0) or
+            // Collapses on taps that land anywhere outside the content-sized
+            // expanded window (delivered to the view as ACTION_OUTSIDE).
+            (if (expanded && !isTouchableRegionSupported) {
+                WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
+            } else 0)
 
+        // Expanded content is centered on the screen inside its window, so the
+        // window itself must be centered too; only the narrow collapsed window
+        // tracks the user's pill x-offset.
         val currentX = if (expanded || isTouchableRegionSupported) 0 else windowXPx
         val currentY = settings.yOffset.dpToPx()
         val currentSoftInputMode = if (isInput) {
@@ -893,92 +971,233 @@ class SmartIslandOverlayService : AccessibilityService() {
     }
 
     /**
-     * Toggles Bluetooth via the Quick Settings tile. Apps cannot enable or disable
-     * Bluetooth directly on Android 12+ without system dialogs or settings pages,
-     * but this accessibility service can pull down the shade and tap the tile,
-     * which toggles it in either direction.
-     */
-    /**
-     * Toggles Bluetooth via the Quick Settings tile. Apps cannot enable or disable
-     * Bluetooth directly on Android 12+ without system dialogs or settings pages,
-     * so the accessibility service opens the QS panel and performs an
-     * accessibility-node click on the tile. Node actions are framework-level:
-     * they bypass the island's window entirely, so the island is never hidden and
-     * the info menu stays visible the whole time.
+     * Toggles Bluetooth from the idle info menu. The island never hides and the
+     * menu never closes — the toggle runs entirely behind the overlay.
+     *
+     * Preferred path — Shizuku: with shell-level privileges the hidden
+     * BluetoothManagerService commands (`cmd bluetooth_manager enable|disable`,
+     * `svc bluetooth enable|disable`) work in both directions on Android 12+,
+     * where BluetoothAdapter.enable()/disable() return false for normal apps.
+     * No dialogs, no settings pages, no shade pull-down.
+     *
+     * Fallback path — Quick Settings tile: the accessibility service opens QS,
+     * waits for the shade window, locates the Bluetooth tile (scrolling the
+     * tile carousel if needed) and taps it with a synthetic gesture while the
+     * island window carries FLAG_NOT_TOUCHABLE (suppressShadeHide also keeps
+     * the island visible). QS is closed again with GLOBAL_ACTION_BACK.
+     *
+     * Both paths verify the result through the permission-free
+     * Settings.Global "bluetooth_on" switch and the fallback retries the tap.
      */
     private fun toggleBluetoothViaShade() {
-        // Keep the island fully visible, but make its window transparent to
-        // touches so the tile tap below passes through to the QS panel.
+        // Keep the island fully visible; make its window transparent to touches
+        // while system UI below may need the tap (QS fallback path).
         suppressShadeHide = true
         if (::viewModel.isInitialized) {
             updateWindowLayoutParams(isWindowExpanded, viewModel.settings.value)
         }
-        performGlobalAction(
-            android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_QUICK_SETTINGS
-        )
-
         serviceScope.launch {
-            runSuspendCatchingLogged(TAG, "Shade bluetooth toggle failed") {
-                val before = runCatching {
-                    Settings.Global.getInt(contentResolver, "bluetooth_on", 0) != 0
-                }.getOrDefault(false)
-                var tapped = false
-                repeat(6) {
-                    delay(500L)
-                    if (tapped) return@repeat
-                    val root = rootInActiveWindow ?: return@repeat
-                    val matches = root.findAccessibilityNodeInfosByText("Bluetooth")
-                    if (matches.isNullOrEmpty()) return@repeat
-                    val tile = matches.firstOrNull { node ->
-                        node.contentDescription?.toString() == "Bluetooth" &&
-                            node.text?.toString() == null
-                    } ?: matches.firstOrNull { node ->
-                        node.contentDescription?.toString() == "Bluetooth"
-                    } ?: return@repeat
-                    val bounds = android.graphics.Rect()
-                    tile.getBoundsInScreen(bounds)
-                    if (bounds.width() <= 0) return@repeat
-                    val tapPath = android.graphics.Path().apply {
-                        moveTo(bounds.exactCenterX(), bounds.exactCenterY())
-                    }
-                    val tap = android.accessibilityservice.GestureDescription.Builder()
-                        .addStroke(
-                            android.accessibilityservice.GestureDescription.StrokeDescription(
-                                tapPath,
-                                0,
-                                60
-                            )
-                        )
-                        .build()
-                    dispatchGesture(tap, null, null)
-                    tapped = true
-                }
-                delay(900L)
-                performGlobalAction(
-                    android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK
-                )
-                delay(400L)
-                suppressShadeHide = false
+            runSuspendCatchingLogged(TAG, "Bluetooth toggle failed") {
+                val before = isBluetoothOn()
                 if (::viewModel.isInitialized) {
-                    updateWindowLayoutParams(isWindowExpanded, viewModel.settings.value)
+                    viewModel.postMenuFeedback(
+                        if (before) "Turning Bluetooth off…" else "Turning Bluetooth on…"
+                    )
                 }
-                val after = runCatching {
-                    Settings.Global.getInt(contentResolver, "bluetooth_on", 0) != 0
-                }.getOrDefault(before)
-                if (after == before) {
-                    Toast.makeText(
-                        this@SmartIslandOverlayService,
-                        "Couldn't toggle Bluetooth",
-                        Toast.LENGTH_SHORT
-                    ).show()
+                var changed = false
+
+                // 1) Shizuku: shell-privileged toggle — reliable both ways.
+                //    Availability + permission are checked inside, on IO.
+                if (ShizukuManager.isBinderAvailable()) {
+                    val dispatched = ShizukuManager.toggleBluetooth(!before)
+                    changed = dispatched.isSuccess && waitForBluetoothState(!before, timeoutMs = 4000L)
+                    android.util.Log.d(
+                        TAG,
+                        "Shizuku bluetooth toggle: dispatched=${dispatched.isSuccess} changed=$changed " +
+                            "(reason=${dispatched.exceptionOrNull()?.message ?: "ok"})"
+                    )
                 } else {
-                    // Keep the info menu alive (and expanded) behind the shade.
-                    if (::viewModel.isInitialized) {
+                    android.util.Log.d(
+                        TAG,
+                        "Shizuku unavailable (installed=${ShizukuManager.isInstalled(this@SmartIslandOverlayService)} " +
+                            "binder=${ShizukuManager.isBinderAvailable()}); using QS tile fallback"
+                    )
+                }
+
+                // 2) Fallback: pull down Quick Settings and tap the Bluetooth tile.
+                if (!changed) {
+                    changed = toggleBluetoothViaQsTile(before)
+                }
+
+                if (::viewModel.isInitialized) {
+                    if (changed) {
+                        viewModel.postMenuFeedback(if (before) "Bluetooth off" else "Bluetooth on")
+                        // The info menu stays open behind the toggle; restart the
+                        // auto-collapse window so the menu does not linger.
                         viewModel.resetAutoCollapseTimer()
+                    } else {
+                        viewModel.postMenuFeedback("Couldn't toggle Bluetooth")
                     }
                 }
             }
+            // Always restore touch handling, even if the block above threw.
+            suppressShadeHide = false
+            if (::viewModel.isInitialized) {
+                updateWindowLayoutParams(isWindowExpanded, viewModel.settings.value)
+            }
         }
+    }
+
+    /** Permission-free Bluetooth state: Settings.Global "bluetooth_on". */
+    private fun isBluetoothOn(): Boolean = runCatching {
+        Settings.Global.getInt(contentResolver, "bluetooth_on", 0) != 0
+    }.getOrDefault(false)
+
+    /** Polls Settings.Global until Bluetooth reaches [target] or [timeoutMs] elapses. */
+    private suspend fun waitForBluetoothState(target: Boolean, timeoutMs: Long): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (isBluetoothOn() == target) return true
+            delay(200L)
+        }
+        return isBluetoothOn() == target
+    }
+
+    /**
+     * QS-tile fallback toggle. Returns true when the state actually flipped.
+     * Opens QS, taps the Bluetooth tile (retrying and scrolling the tile
+     * carousel as needed) and closes QS again via BACK — but only if QS was
+     * really opened, so a failed open never sends a stray BACK to the launcher.
+     */
+    private suspend fun toggleBluetoothViaQsTile(before: Boolean): Boolean {
+        performGlobalAction(
+            android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_QUICK_SETTINGS
+        )
+        val opened = waitForQuickSettings(timeoutMs = 2500L)
+        if (!opened) {
+            android.util.Log.w(TAG, "QS fallback: quick settings window never appeared")
+            return false
+        }
+        try {
+            var carouselSwipes = 0
+            val deadline = System.currentTimeMillis() + 6000L
+            while (System.currentTimeMillis() < deadline) {
+                val tile = findBluetoothTileNode()
+                if (tile == null) {
+                    if (carouselSwipes < 2) {
+                        // The tile may live on the next QS carousel page.
+                        swipeQuickSettingsCarousel()
+                        carouselSwipes++
+                        continue
+                    }
+                    delay(300L)
+                    continue
+                }
+                val bounds = android.graphics.Rect()
+                tile.getBoundsInScreen(bounds)
+                if (bounds.width() <= 0 || bounds.height() <= 0) {
+                    delay(300L)
+                    continue
+                }
+                val tapPath = android.graphics.Path().apply {
+                    moveTo(bounds.exactCenterX(), bounds.exactCenterY())
+                }
+                val tap = android.accessibilityservice.GestureDescription.Builder()
+                    .addStroke(
+                        android.accessibilityservice.GestureDescription.StrokeDescription(
+                            tapPath,
+                            0,
+                            80
+                        )
+                    )
+                    .build()
+                dispatchGesture(tap, null, null)
+                if (waitForBluetoothState(!before, timeoutMs = 2000L)) {
+                    return true
+                }
+                // The tap may have landed on a stale node or missed the tile;
+                // loop and try again until the deadline.
+            }
+            return false
+        } finally {
+            // Close QS again so the user is returned to what was below. The
+            // island menu itself is overlay content and is unaffected by BACK.
+            delay(500L)
+            performGlobalAction(
+                android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK
+            )
+            delay(400L)
+        }
+    }
+
+    private suspend fun waitForQuickSettings(timeoutMs: Long): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            // The expanded QS panel is a full-screen SystemUI window, exactly
+            // what the shade detector already looks for.
+            if (detectShadeFromWindows()) return true
+            delay(150L)
+        }
+        return false
+    }
+
+    /**
+     * Finds the Quick Settings "Bluetooth" tile across the SystemUI windows.
+     * Matching is layered: exact content description first, then a containing
+     * description, then the tile text — each candidate must be visibly on
+     * screen (non-empty bounds that fit inside a tile-sized area).
+     */
+    private fun findBluetoothTileNode(): android.view.accessibility.AccessibilityNodeInfo? {
+        val screenWidth = resources.displayMetrics.widthPixels
+        val screenHeight = resources.displayMetrics.heightPixels
+        val candidateRoots = mutableListOf<android.view.accessibility.AccessibilityNodeInfo>()
+        rootInActiveWindow?.let { candidateRoots.add(it) }
+        runCatchingLogged(TAG, "QS window roots failed") {
+            getWindows()
+                ?.filter { it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_SYSTEM }
+                ?.forEach { window ->
+                    val root = window.root ?: return@forEach
+                    if (!candidateRoots.contains(root)) candidateRoots.add(root)
+                }
+        }
+        for (root in candidateRoots) {
+            val matches = root.findAccessibilityNodeInfosByText("Bluetooth")
+            val tile = matches?.firstOrNull { node ->
+                node.contentDescription?.toString()?.equals("Bluetooth", ignoreCase = true) == true &&
+                    node.text?.toString().isNullOrEmpty()
+            } ?: matches?.firstOrNull { node ->
+                node.contentDescription?.toString()?.contains("Bluetooth", ignoreCase = true) == true
+            } ?: matches?.firstOrNull { node ->
+                node.text?.toString()?.contains("Bluetooth", ignoreCase = true) == true
+            } ?: continue
+            val bounds = android.graphics.Rect()
+            tile.getBoundsInScreen(bounds)
+            val tileSized = bounds.width() in 1..(screenWidth / 2) &&
+                bounds.height() in 1..(screenHeight / 3)
+            if (tileSized) return tile
+        }
+        return null
+    }
+
+    /** Swipes the QS tile carousel sideways to reveal tiles on the next page. */
+    private suspend fun swipeQuickSettingsCarousel() {
+        val dm = resources.displayMetrics
+        val y = dm.heightPixels * 0.16f
+        val path = android.graphics.Path().apply {
+            moveTo(dm.widthPixels * 0.80f, y)
+            lineTo(dm.widthPixels * 0.15f, y)
+        }
+        val swipe = android.accessibilityservice.GestureDescription.Builder()
+            .addStroke(
+                android.accessibilityservice.GestureDescription.StrokeDescription(
+                    path,
+                    0,
+                    220
+                )
+            )
+            .build()
+        dispatchGesture(swipe, null, null)
+        delay(600L)
     }
 
     /**
@@ -1029,9 +1248,10 @@ class SmartIslandOverlayService : AccessibilityService() {
                     }
                 }
                 "bluetooth" -> {
-                    // Toggle via the Quick Settings tile: apps cannot enable or
-                    // disable Bluetooth directly on Android 12+ without dialogs or
-                    // settings pages. The tile handles both directions.
+                    // Toggle Bluetooth without leaving the menu: Shizuku shell
+                    // command first (works both directions on Android 12+),
+                    // Quick Settings tile gesture as fallback. The island stays
+                    // visible and the menu stays open either way.
                     openedSomething = false
                     toggleBluetoothViaShade()
                 }
@@ -1141,6 +1361,40 @@ class SmartIslandOverlayService : AccessibilityService() {
 
     private fun Float.dpToPx(): Int = (this * resources.displayMetrics.density).toInt()
 
+    /**
+     * Called by the Compose tree whenever the measured expanded island content
+     * size changes. Only used on devices where the hidden touchableRegion API
+     * is blocked and the expanded window must be sized to its content for
+     * touch passthrough (see updateWindowLayoutParams).
+     */
+    private fun onExpandedWindowContentSizeChanged(widthPx: Int, heightPx: Int) {
+        if (destroyed || !::viewModel.isInitialized) return
+        if (widthPx <= 0 || heightPx <= 0) return
+        if (widthPx == expandedWindowWidthPx && heightPx == expandedWindowHeightPx) return
+        expandedWindowWidthPx = widthPx
+        expandedWindowHeightPx = heightPx
+        android.util.Log.d(TAG, "Expanded window content size: ${widthPx}x${heightPx}px")
+        if (isWindowExpanded && !isTouchableRegionSupported) {
+            updateWindowLayoutParams(isWindowExpanded, viewModel.settings.value)
+        }
+    }
+
+    /**
+     * Upper bound for the expanded card height (250dp measured clamp) plus
+     * status-bar offset and room for the shadow — used only until the Compose
+     * tree reports the real content size.
+     */
+    private fun estimatedExpandedWindowHeightPx(): Int =
+        ((statusBarHeight + 250f + 32f) * resources.displayMetrics.density).toInt()
+
+    /** Package name of the current home/launcher app, for exit detection. */
+    private fun resolveLauncherPackage(): String? = runCatchingLogged(TAG, "Launcher resolve failed") {
+        packageManager.resolveActivity(
+            Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME),
+            android.content.pm.PackageManager.MATCH_DEFAULT_ONLY
+        )?.activityInfo?.packageName
+    }
+
     private fun ComposeView.installOverlayViewTreeOwners() {
         setViewTreeLifecycleOwner(overlayOwners)
         setViewTreeViewModelStoreOwner(overlayOwners)
@@ -1195,6 +1449,7 @@ class SmartIslandOverlayService : AccessibilityService() {
         private const val OVERLAY_CHANNEL_ID = "smart_island_overlay"
         private const val OVERLAY_CHANNEL_NAME = "Smart Island overlay"
         private const val AUTO_COLLAPSE_DELAY_MS = 220L
+        private const val EXPANDED_WINDOW_WIDTH_RATIO = 0.95f
     }
 
     /**
