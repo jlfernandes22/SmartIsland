@@ -651,8 +651,15 @@ class SmartIslandOverlayService : AccessibilityService() {
                         val isSplitMode = notificationsCount >= 2
 
                         val mainWidthPx = settingsVal.width * density
+                        // Same group width as collapsedParams(): with 3+
+                        // notifications the tertiary circle is drawn too and
+                        // must stay inside the touchable region.
                         val groupWidthPx = (
-                            settingsVal.width + if (isSplitMode) 8f + settingsVal.height else 0f
+                            settingsVal.width + when {
+                                notificationsCount >= 3 -> 2 * (8f + settingsVal.height)
+                                isSplitMode -> 8f + settingsVal.height
+                                else -> 0f
+                            }
                         ) * density
                         val edgePaddingPx = 8f * density
                         val touchPaddingPx = 6f * density
@@ -745,13 +752,22 @@ class SmartIslandOverlayService : AccessibilityService() {
             view.visibility = targetVisibility
         }
 
-        val isSplitMode = viewModel.notifications.value.size >= 2
+        val notificationCount = viewModel.notifications.value.size
+        val isSplitMode = notificationCount >= 2
         val mainWidthPx = settings.width * density
         val circleSizePx = settings.height * density
         val compactGapPx = 8f * density
         val edgePaddingPx = 8f * density
-        val groupWidthPx = mainWidthPx + if (isSplitMode) compactGapPx + circleSizePx else 0f
-        
+        // Collapsed group = main pill + one gap+circle per companion bubble.
+        // 3+ notifications also draw a tertiary circle, so the narrow window
+        // must cover a second gap+circle or it clips that bubble (mirrors
+        // companionGroupWidth in IslandOverlayView).
+        val groupWidthPx = mainWidthPx + when {
+            notificationCount >= 3 -> 2 * (compactGapPx + circleSizePx)
+            isSplitMode -> compactGapPx + circleSizePx
+            else -> 0f
+        }
+
         val desiredMainLeftPx = screenWidthPx / 2f + settings.xOffset * density - mainWidthPx / 2f
         val maxMainLeftPx = (screenWidthPx - groupWidthPx - edgePaddingPx).coerceAtLeast(edgePaddingPx)
         val mainLeftPx = desiredMainLeftPx.coerceIn(edgePaddingPx, maxMainLeftPx)
@@ -853,19 +869,28 @@ class SmartIslandOverlayService : AccessibilityService() {
     private fun collapsedParams(settings: SmartIslandSettings): WindowManager.LayoutParams {
         val density = resources.displayMetrics.density
         val screenWidthPx = resources.displayMetrics.widthPixels.toFloat()
-        val isSplitMode = if (::viewModel.isInitialized) viewModel.notifications.value.size >= 2 else false
+        val notificationCount = if (::viewModel.isInitialized) viewModel.notifications.value.size else 0
+        val isSplitMode = notificationCount >= 2
         val mainWidthPx = settings.width * density
         val circleSizePx = settings.height * density
         val compactGapPx = 8f * density
         val edgePaddingPx = 8f * density
-        val groupWidthPx = mainWidthPx + if (isSplitMode) compactGapPx + circleSizePx else 0f
-        
+        // Collapsed group = main pill + one gap+circle per companion bubble.
+        // 3+ notifications also draw a tertiary circle, so the narrow window
+        // must cover a second gap+circle or it clips that bubble (mirrors
+        // companionGroupWidth in IslandOverlayView).
+        val groupWidthPx = mainWidthPx + when {
+            notificationCount >= 3 -> 2 * (compactGapPx + circleSizePx)
+            isSplitMode -> compactGapPx + circleSizePx
+            else -> 0f
+        }
+
         val desiredMainLeftPx = screenWidthPx / 2f + settings.xOffset * density - mainWidthPx / 2f
         val maxMainLeftPx = (screenWidthPx - groupWidthPx - edgePaddingPx).coerceAtLeast(edgePaddingPx)
         val mainLeftPx = desiredMainLeftPx.coerceIn(edgePaddingPx, maxMainLeftPx)
         val groupCenterPx = mainLeftPx + groupWidthPx / 2f
         val windowXPx = (groupCenterPx - screenWidthPx / 2f).toInt()
-        
+
         val w = if (isTouchableRegionSupported) {
             WindowManager.LayoutParams.MATCH_PARENT
         } else {

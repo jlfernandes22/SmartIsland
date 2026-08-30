@@ -173,20 +173,41 @@ fun IslandOverlayView(
     val circleSize = effectiveHeight.dp
     val hasCompanion = notifications.size >= 2
     val hasTertiary = notifications.size >= 3
+    // Collapsed: one gap+circle per companion bubble. The tertiary circle is
+    // drawn for 3+ notifications and needs its own gap+circle of window space
+    // (mirrors groupWidthPx in SmartIslandOverlayService).
     val companionGroupWidth = when {
         !hasCompanion -> 0.dp
         expanded -> compactGap + miniPillWidth + if (hasTertiary) compactGap + circleSize else 0.dp
-        else -> compactGap + circleSize
+        else -> compactGap + circleSize + if (hasTertiary) compactGap + circleSize else 0.dp
     }
     val collapsedMainLeft = (screenCenter + settings.xOffset.dp - effectiveWidth.dp / 2f)
         .coerceIn(
             compactGap,
             (screenWidth - companionGroupWidth - compactGap).coerceAtLeast(compactGap)
         )
+    // The bubble Boxes are centered by the parent's contentAlignment, and
+    // absoluteOffset translates them from that centered base position.
+    // Full-width windows are centered at the screen center; the narrow collapsed
+    // window is centered on the whole pill group (main pill + companion
+    // bubbles): collapsedMainLeft + (mainWidth + companionGroupWidth) / 2.
+    // Omitting the main pill's half-width here shifted every collapsed
+    // companion offset ~mainWidth/2 too large, pushing the secondary bubble
+    // past the narrow window's right edge (it "snapped right and disappeared"
+    // on collapse, and 3+ bubbles never showed at all).
+    val baseCenter = if (isFullWidth) {
+        screenCenter
+    } else {
+        collapsedMainLeft + (effectiveWidth.dp + companionGroupWidth) / 2f
+    }
     val collapsedMainOffset = if (isFullWidth) {
         collapsedMainLeft + effectiveWidth.dp / 2f - screenCenter
     } else {
-        if (hasCompanion) -(compactGap + circleSize) / 2f else 0.dp
+        // Narrow window: the window is centered on the group, so shift the
+        // main pill from the group center back to its own center (the punch
+        // hole) for any companion count. Reduces to screenCenter - baseCenter
+        // for xOffset 0.
+        collapsedMainLeft + effectiveWidth.dp / 2f - baseCenter
     }
     val expandedTopOffset = if (hasCompanion) {
         statusBarHeight.dp.coerceAtLeast(circleSize + compactGap)
@@ -384,12 +405,6 @@ fun IslandOverlayView(
         animationSpec = spring(dampingRatio = 0.68f, stiffness = 480f),
         label = "tertiaryScale"
     )
-
-    // The bubble Boxes are centered by the parent's contentAlignment, and
-    // absoluteOffset translates them from that centered base position.
-    // Full-width windows are centered at the screen center; the narrow collapsed
-    // window is centered on the pill group instead.
-    val baseCenter = if (isFullWidth) screenCenter else collapsedMainLeft + companionGroupWidth / 2f
 
     // Secondary bubble: circle right of the main pill when collapsed; when expanded
     // the next most important notification snaps to the middle (punch-hole position)

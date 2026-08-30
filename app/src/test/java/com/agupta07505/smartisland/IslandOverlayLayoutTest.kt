@@ -74,4 +74,48 @@ class IslandOverlayLayoutTest {
             )
         }
     }
+
+    @Test
+    fun threeNotificationWindowCoversTertiaryBubble() {
+        // Device-like numbers: 1440px screen @ density 2.75, 149x40dp pill.
+        val density = 2.75f
+        val screenWidthPx = 1440f
+        val widthDp = 149f
+        val heightDp = 40f
+        val compactGapDp = 8f
+        val edgePaddingDp = 8f
+
+        val mainWidthPx = widthDp * density
+        val circleSizePx = heightDp * density
+        val compactGapPx = compactGapDp * density
+        val edgePaddingPx = edgePaddingDp * density
+        // Mirrors collapsedParams()/updateWindowLayoutParams(): the group is
+        // the main pill plus one gap+circle per companion bubble (two for 3+).
+        val groupWidthPx = mainWidthPx + 2 * (compactGapPx + circleSizePx)
+
+        val desiredMainLeftPx = screenWidthPx / 2f - mainWidthPx / 2f
+        val maxMainLeftPx = (screenWidthPx - groupWidthPx - edgePaddingPx).coerceAtLeast(edgePaddingPx)
+        val mainLeftPx = desiredMainLeftPx.coerceIn(edgePaddingPx, maxMainLeftPx)
+        val groupCenterPx = mainLeftPx + groupWidthPx / 2f
+        val windowXPx = (groupCenterPx - screenWidthPx / 2f).toInt()
+        val windowWidthPx = (groupWidthPx + 32f * density).toInt()
+
+        val windowLeftPx = screenWidthPx / 2f + windowXPx - windowWidthPx / 2f
+        val windowRightPx = screenWidthPx / 2f + windowXPx + windowWidthPx / 2f
+
+        // Collapsed row for 3 notifications: main pill, gap, secondary circle,
+        // gap, tertiary circle (drawn by IslandOverlayView when count >= 3).
+        val secondaryLeftPx = mainLeftPx + mainWidthPx + compactGapPx
+        val tertiaryLeftPx = secondaryLeftPx + circleSizePx + compactGapPx
+        val tertiaryRightPx = tertiaryLeftPx + circleSizePx
+
+        org.junit.Assert.assertTrue(
+            "Secondary circle left ($secondaryLeftPx) must be >= window left ($windowLeftPx)",
+            secondaryLeftPx >= windowLeftPx
+        )
+        org.junit.Assert.assertTrue(
+            "Tertiary circle right ($tertiaryRightPx) must be <= window right ($windowRightPx)",
+            tertiaryRightPx <= windowRightPx
+        )
+    }
 }
