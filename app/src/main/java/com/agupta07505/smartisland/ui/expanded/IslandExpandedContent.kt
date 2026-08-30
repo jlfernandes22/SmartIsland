@@ -11,6 +11,9 @@ package com.agupta07505.smartisland.ui.expanded
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+// Aliased: the pager's verticalAlignment takes the FOUNDATION Alignment
+// (Alignment.Vertical) while the rest of this file uses androidx.ui.Alignment.
+import androidx.compose.foundation.layout.Alignment as PagerAlignment
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -63,6 +66,11 @@ fun IslandExpandedContent(
     onLaunchApp: (String) -> Unit,
     onCollapse: () -> Unit,
     statusBarHeight: Dp,
+    // Width the expanded card lays out at (0.95 screen width, computed by
+    // IslandOverlayView). Needed so the info-menu page height can be
+    // ESTIMATED exactly (same formula as the IslandOverlayView height
+    // estimate) before the menu's first real measurement arrives.
+    expandedWidth: Dp,
     onHeightMeasured: (Dp) -> Unit,
     settings: SmartIslandSettings,
     modifier: Modifier = Modifier,
@@ -107,7 +115,20 @@ fun IslandExpandedContent(
     val infoPageIndex = 0
     val pagerOffset = if (showInfoPage) 1 else 0
     val pageCount = notifications.size + pagerOffset
-    var infoPageHeight by remember { mutableStateOf<Dp?>(null) }
+    // Seeded with the SAME deterministic estimate IslandOverlayView uses for
+    // its height spring target (idleInfoMenuHeightDp). The previous null
+    // seed made the first frames report the 135dp generic fallback, so the
+    // card opened tall and then shrank to the real ~60dp menu height after
+    // the first measurement — the "content shifts up after the page settles"
+    // symptom. Estimate == measurement ⇒ the height spring never retargets.
+    var infoPageHeight by remember {
+        mutableStateOf(
+            com.agupta07505.smartisland.ui.expanded.idleInfoMenuHeightDp(
+                settings,
+                expandedWidth.value - 24f
+            )
+        )
+    }
     val scope = rememberCoroutineScope()
 
     // Clean up stale keys not present in notifications
@@ -199,8 +220,9 @@ fun IslandExpandedContent(
 
         fun pageHeightFor(page: Int): Dp {
             if (showInfoPage && page == infoPageIndex) {
-                return infoPageHeight?.coerceIn(IdleInfoMinHeight, IdleInfoMaxHeightDp.dp)
-                    ?: com.agupta07505.smartisland.ui.defaultEstimatedHeightForMode(null)
+                // Seeded with the deterministic menu estimate and kept current
+                // by onSizeChanged, so this never needs a generic fallback.
+                return infoPageHeight.coerceIn(IdleInfoMinHeight, IdleInfoMaxHeightDp.dp)
             }
             val notification = notifications.getOrNull(page - pagerOffset) ?: return 135.dp
             val raw = pageHeights[notification.key]
@@ -236,7 +258,15 @@ fun IslandExpandedContent(
                 modifier = Modifier
                     .fillMaxWidth()
                     // unbounded = true: pages measure at natural height even when parent Box has explicit height
-                    .wrapContentHeight(unbounded = true)
+                    .wrapContentHeight(unbounded = true),
+                // TOP-align pages. The pager wraps the height of its tallest
+                // composed page (e.g. a 175dp music page next to the ~60dp
+                // info menu); the default CenterVertically placement made the
+                // short info page ride up/down inside that height as neighbor
+                // page measurements settled — the post-settle vertical drift
+                // of the icon grid. Top-aligned pages never move when other
+                // pages measure.
+                verticalAlignment = PagerAlignment.Top
             ) { page ->
                 if (showInfoPage && page == infoPageIndex) {
                     Box(

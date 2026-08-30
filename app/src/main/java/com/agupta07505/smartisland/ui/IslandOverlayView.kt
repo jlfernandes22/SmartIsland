@@ -32,6 +32,7 @@ import androidx.compose.foundation.layout.absoluteOffset
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.requiredWidth
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.wrapContentHeight
@@ -44,7 +45,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.Alignment
@@ -98,11 +98,9 @@ fun IslandOverlayView(
     isInputActive: Boolean = false,
     onReplyStateChanged: (Boolean) -> Unit = {},
     onDismissAllNotifications: () -> Unit = {},
-    isFullWidth: Boolean = true,
     onOpenIdleInfoItem: (String) -> Unit = {},
     menuFeedback: String? = null,
-    reappearTick: Int = 0,
-    onExpandedWindowContentSize: (Int, Int) -> Unit = { _, _ -> }
+    reappearTick: Int = 0
 ) {
     // Fix #1: rememberUpdatedState ensures the lambda is always fresh
     // even though pointerInput(Unit) never restarts its coroutine
@@ -345,23 +343,6 @@ fun IslandOverlayView(
                     dampingRatio = Spring.DampingRatioMediumBouncy,
                     stiffness = 620f
                 )
-            )
-        }
-    }
-
-    // Report the measured expanded content size so the service can size the
-    // overlay window to the card on devices without the touchableRegion API
-    // (touch passthrough). Runs on every recomposition while expanded; the
-    // service deduplicates and the height is ceiling-quantized to an 8dp grid
-    // to avoid window relayouts on every frame while swiping between pages
-    // with different card heights.
-    if (expanded && !isFullWidth) {
-        val contentHeight = expandedTopOffset + expandedHeight + 32.dp
-        val quantizedHeightDp = (kotlin.math.ceil(contentHeight.value / 8f) * 8f).dp
-        SideEffect {
-            onExpandedWindowContentSize(
-                with(density) { expandedWidth.roundToPx() },
-                with(density) { quantizedHeightDp.roundToPx() }
             )
         }
     }
@@ -647,23 +628,20 @@ fun IslandOverlayView(
             }
 
             // Expanded content layer — smoothly fade out while collapsing.
-            // The layer is REQUIRED-WIDTH pinned at the final expanded width
-            // instead of tracking the animating pill width: pages and the
-            // info menu lay out ONCE at their real width from the first
-            // frame, so nothing re-flows (and re-measures height) while the
-            // width spring expands. (Plain .width() would be coerced back to
-            // the pill's animating width by the incoming constraints —
-            // requiredWidth is what actually pins it.) The previous
-            // fillMaxWidth chain re-wrapped the icon grid on every width
-            // frame, which kept retargeting the height spring late into the
-            // settle — the small upward shift right after the menu finished
-            // opening. Overflow is clipped by the pill's rounded clip;
-            // mid-morph the layer is fading in/out and the crossfade masks
-            // the wider-than-card content.
+            // fillMaxWidth matches the ORIGINAL upstream mechanics exactly:
+            // the card re-wraps with the animating pill width so the morph is
+            // a true squeeze-into-the-pill (the behavior the original is
+            // loved for). The previous requiredWidth(expandedWidth) pin kept
+            // a full-width layer inside the shrinking pill, whose overflow
+            // crop read as content sliding sideways mid-collapse on the
+            // content-sized-window device class. Height re-measures during
+            // the width spring are harmless: the expanded window is now
+            // full-screen (MATCH_PARENT) on every device, so no window
+            // relayout can chase the card height any more.
             if (expanded || expandedAlpha > 0.01f) {
                 Box(
                     modifier = Modifier
-                        .requiredWidth(expandedWidth)
+                        .fillMaxWidth()
                         .wrapContentHeight()
                         .graphicsLayer {
                             alpha = expandedAlpha
@@ -681,6 +659,7 @@ fun IslandOverlayView(
                         onLaunchApp = onLaunchApp,
                         onCollapse = onToggleExpanded,
                         statusBarHeight = statusBarHeight.dp,
+                        expandedWidth = expandedWidth,
                         // Each mode owns its natural height. The launcher already
                         // supplies its own loading height and must not impose that
                         // minimum on compact call or battery content.

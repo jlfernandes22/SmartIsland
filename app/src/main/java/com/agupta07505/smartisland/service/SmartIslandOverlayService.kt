@@ -94,11 +94,12 @@ class SmartIslandOverlayService : AccessibilityService() {
     // flow (both removed — their per-frame updateViewLayout churn plus the
     // unavoidable one-frame lag between the relayout and the Compose
     // recomposition made the collapsed island visibly shake).
-    // Content-sized expanded window (touch-passthrough fallback): reported by the
-    // Compose tree when the hidden touchableRegion API is unavailable, so the
-    // expanded window can be sized to the card instead of swallowing the screen.
-    @Volatile private var expandedWindowWidthPx: Int = 0
-    @Volatile private var expandedWindowHeightPx: Int = 0
+    // The EXPANDED window is MATCH_PARENT in both axes on every device (the
+    // original upstream's mechanics). A content-sized expanded window (a
+    // former touch-passthrough experiment) made every collapse a mid-morph
+    // window resize whose surface-relayout transient displaced the rendered
+    // pill and bubbles LEFT for a few frames — the root cause of the
+    // "collapse jumps left" bug report.
     private var lastForegroundPackage: String? = null
     private var launcherPackage: String? = null
 
@@ -583,33 +584,8 @@ class SmartIslandOverlayService : AccessibilityService() {
                         onOpenNotification = { notification -> openNotification(notification) },
                         onLaunchApp = { packageName -> launchApp(packageName) },
                         onOpenFloatingWindow = { openCurrentNotificationInFloatingWindow() },
-                        isFullWidth = isTouchableRegionSupported,
-                        onOpenIdleInfoItem = { item -> openIdleInfoItem(item) },
-                        onExpandedWindowContentSize = { widthPx, heightPx ->
-                            onExpandedWindowContentSizeChanged(widthPx, heightPx)
-                        }
+                        onOpenIdleInfoItem = { item -> openIdleInfoItem(item) }
                     )
-                }
-
-                // Supported touch-passthrough for the EXPANDED overlay on devices
-                // where the hidden touchableRegion reflection is blocked: the
-                // window is sized to the island content (see
-                // updateWindowLayoutParams) and FLAG_WATCH_OUTSIDE_TOUCH turns
-                // every tap outside it into an ACTION_OUTSIDE event, which
-                // collapses the island — replacing the old full-screen window's
-                // "tap anywhere outside to dismiss" behaviour.
-                setOnTouchListener { _, event ->
-                    if (event.actionMasked == android.view.MotionEvent.ACTION_OUTSIDE &&
-                        !suppressShadeHide &&
-                        ::viewModel.isInitialized &&
-                        viewModel.expanded.value
-                    ) {
-                        android.util.Log.d(TAG, "Touch outside expanded island window; collapsing")
-                        viewModel.collapse()
-                        true
-                    } else {
-                        false
-                    }
                 }
 
                 setupTouchableRegion(this)
@@ -751,7 +727,6 @@ class SmartIslandOverlayService : AccessibilityService() {
         if (destroyed || !::windowManager.isInitialized || !::viewModel.isInitialized) return
         val view = islandView ?: return
         val density = resources.displayMetrics.density
-        val screenWidthPx = resources.displayMetrics.widthPixels.toFloat()
         
         val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
         val isLocked = keyguardManager?.isKeyguardLocked == true
@@ -784,24 +759,28 @@ class SmartIslandOverlayService : AccessibilityService() {
         // companionGroupWidth in IslandOverlayView).
         val collapsedWidthPx = collapsedWindowWidthPx(settings, notificationCount, density)
 
+        // ORIGINAL upstream window mechanics (github.com/agupta07505/SmartIsland):
+        // the EXPANDED window is always MATCH_PARENT in both axes, and the
+        // collapsed window is the narrow content-sized one. The earlier fork
+        // experiment sized the expanded window to the reported card content
+        // (touch passthrough on devices where the touchableRegion reflection
+        // is blocked), but that made the collapse a WINDOW resize
+        // (content-sized → narrow) mid-morph — the surface relayout transient
+        // rendered the pill AND companion bubbles displaced LEFT for a few
+        // frames, gliding back as the resize animation finished. With the
+        // full-screen expanded window the whole collapse morph is pure
+        // Compose inside one stable window (identical to the original's
+        // animation path), and the single 220ms resize only swaps the clip
+        // bounds after the springs are past the visible-motion phase.
         val h = if (expanded) {
-            if (!isTouchableRegionSupported) {
-                // Touch-passthrough fallback: size the window to the expanded
-                // card (reported by the Compose tree) instead of MATCH_PARENT,
-                // so touches on the rest of the screen reach the app underneath.
-                expandedWindowHeightPx.takeIf { it > 0 } ?: estimatedExpandedWindowHeightPx()
-            } else {
-                WindowManager.LayoutParams.MATCH_PARENT
-            }
+            WindowManager.LayoutParams.MATCH_PARENT
         } else {
             ((settings.height + 16f) * density).toInt()
         }
-        val w = when {
-            expanded && !isTouchableRegionSupported ->
-                expandedWindowWidthPx.takeIf { it > 0 }
-                    ?: (screenWidthPx * EXPANDED_WINDOW_WIDTH_RATIO).toInt()
-            expanded || isTouchableRegionSupported -> WindowManager.LayoutParams.MATCH_PARENT
-            else -> collapsedWidthPx
+        val w = if (expanded || isTouchableRegionSupported) {
+            WindowManager.LayoutParams.MATCH_PARENT
+        } else {
+            collapsedWidthPx
         }
         val isInput = viewModel.isInputActive.value && expanded
         val focusFlags = if (isInput) 0 else WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
@@ -810,12 +789,7 @@ class SmartIslandOverlayService : AccessibilityService() {
             WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
             WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
             WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED or
-            (if (suppressShadeHide) WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE else 0) or
-            // Collapses on taps that land anywhere outside the content-sized
-            // expanded window (delivered to the view as ACTION_OUTSIDE).
-            (if (expanded && !isTouchableRegionSupported) {
-                WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
-            } else 0)
+            (if (suppressShadeHide) WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE else 0)
 
         // WINDOW CENTERING INVARIANT: x is 0 in every state. The expanded and
         // collapsed windows share the screen center, so the delayed
@@ -1597,32 +1571,6 @@ class SmartIslandOverlayService : AccessibilityService() {
 
     private fun Float.dpToPx(): Int = (this * resources.displayMetrics.density).toInt()
 
-    /**
-     * Called by the Compose tree whenever the measured expanded island content
-     * size changes. Only used on devices where the hidden touchableRegion API
-     * is blocked and the expanded window must be sized to its content for
-     * touch passthrough (see updateWindowLayoutParams).
-     */
-    private fun onExpandedWindowContentSizeChanged(widthPx: Int, heightPx: Int) {
-        if (destroyed || !::viewModel.isInitialized) return
-        if (widthPx <= 0 || heightPx <= 0) return
-        if (widthPx == expandedWindowWidthPx && heightPx == expandedWindowHeightPx) return
-        expandedWindowWidthPx = widthPx
-        expandedWindowHeightPx = heightPx
-        android.util.Log.d(TAG, "Expanded window content size: ${widthPx}x${heightPx}px")
-        if (isWindowExpanded && !isTouchableRegionSupported) {
-            updateWindowLayoutParams(isWindowExpanded, viewModel.settings.value)
-        }
-    }
-
-    /**
-     * Upper bound for the expanded card height (250dp measured clamp) plus
-     * status-bar offset and room for the shadow — used only until the Compose
-     * tree reports the real content size.
-     */
-    private fun estimatedExpandedWindowHeightPx(): Int =
-        ((statusBarHeight + 250f + 32f) * resources.displayMetrics.density).toInt()
-
     /** Package name of the current home/launcher app, for exit detection. */
     private fun resolveLauncherPackage(): String? = runCatchingLogged(TAG, "Launcher resolve failed") {
         packageManager.resolveActivity(
@@ -1688,15 +1636,13 @@ class SmartIslandOverlayService : AccessibilityService() {
         // like the ORIGINAL upstream (github.com/agupta07505/SmartIsland,
         // AUTO_COLLAPSE_DELAY_MS = 220): the window narrows MID-MORPH — while
         // the springs are still moving fast — where the surface-resize
-        // transient is invisible. The previous build had TWO writers (a
-        // Compose "first-fit" callback plus this backstop at 480ms); when the
-        // callback missed, the backstop landed ~200ms AFTER the springs
-        // settled and the resize transient showed as a brief jump of the
-        // right-side companion bubbles toward the window center — the
-        // post-settle flicker. Single writer at the original's proven 220ms:
-        // the settled collapsed state is never touched by a window resize.
+        // transient is invisible. The expanded window is full-screen
+        // (MATCH_PARENT), so the collapse morph before this point is pure
+        // Compose with zero window churn (the former content-sized expanded
+        // window turned every collapse into a mid-morph relayout whose
+        // transient displaced the rendered pill/bubbles LEFT). The settled
+        // collapsed state is never touched by a window resize.
         private const val AUTO_COLLAPSE_DELAY_MS = 220L
-        private const val EXPANDED_WINDOW_WIDTH_RATIO = 0.95f
     }
 
     /**
