@@ -9,6 +9,7 @@ package com.agupta07505.smartisland.ui.expanded
 
 import android.bluetooth.BluetoothAdapter
 import android.content.Context
+import android.content.Intent
 import android.content.IntentFilter
 import android.os.BatteryManager
 import android.os.Build
