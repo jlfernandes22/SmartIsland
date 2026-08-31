@@ -79,41 +79,84 @@ object ShizukuManager {
         }
     }
 
+    /** Raw result of one Shizuku-exec'd shell script. */
+    private class ShizukuShellResult(
+        val exitCode: Int,
+        val output: String,
+        val error: String
+    )
+
+    /**
+     * Spawns one `sh -c [script]` process inside the Shizuku server (uid
+     * 2000) and collects its streams. Shared by both runners below.
+     *
+     * Stderr is drained on a helper thread: if the remote process fills its
+     * stderr pipe while this thread blocks reading stdout (or vice versa) the
+     * command deadlocks forever — which would leave the island window stuck
+     * with FLAG_NOT_TOUCHABLE during a toggle.
+     */
+    private fun shizukuExec(script: String): ShizukuShellResult {
+        val newProcessMethod = Shizuku::class.java.getDeclaredMethod(
+            "newProcess",
+            Array<String>::class.java,
+            Array<String>::class.java,
+            String::class.java
+        ).apply { isAccessible = true }
+
+        val process = newProcessMethod.invoke(null, arrayOf("sh", "-c", script), null, null) as Process
+
+        val errorBuilder = java.lang.StringBuffer()
+        val errorDrainer = Thread {
+            runCatching {
+                BufferedReader(InputStreamReader(process.errorStream)).use { it.readText() }
+            }.getOrNull()?.let { errorBuilder.append(it) }
+        }.apply { isDaemon = true; start() }
+
+        val output = BufferedReader(InputStreamReader(process.inputStream)).use { it.readText() }
+        errorDrainer.join(5000L)
+        val error = errorBuilder.toString()
+        val exitCode = process.waitFor()
+        return ShizukuShellResult(exitCode, output, error)
+    }
+
     private fun runShizukuCommands(commands: List<String>): Result<String> {
         if (!hasPermission()) {
             return Result.failure(IllegalStateException("Shizuku permission not granted or service binder offline."))
         }
         return runCatching {
             val fullScript = commands.joinToString("; ")
-            val newProcessMethod = Shizuku::class.java.getDeclaredMethod(
-                "newProcess",
-                Array<String>::class.java,
-                Array<String>::class.java,
-                String::class.java
-            ).apply { isAccessible = true }
+            val result = shizukuExec(fullScript)
 
-            val process = newProcessMethod.invoke(null, arrayOf("sh", "-c", fullScript), null, null) as Process
-
-            // Drain stderr on a helper thread: if the remote process fills its
-            // stderr pipe while this thread blocks reading stdout (or vice
-            // versa) the command deadlocks forever — which would leave the
-            // island window stuck with FLAG_NOT_TOUCHABLE during a toggle.
-            val errorBuilder = java.lang.StringBuffer()
-            val errorDrainer = Thread {
-                runCatching {
-                    BufferedReader(InputStreamReader(process.errorStream)).use { it.readText() }
-                }.getOrNull()?.let { errorBuilder.append(it) }
-            }.apply { isDaemon = true; start() }
-
-            val output = BufferedReader(InputStreamReader(process.inputStream)).use { it.readText() }
-            errorDrainer.join(5000L)
-            val error = errorBuilder.toString()
-            val exitCode = process.waitFor()
-
-            if (exitCode == 0 || output.isNotBlank() || error.isBlank()) {
+            if (result.exitCode == 0 || result.output.isNotBlank() || result.error.isBlank()) {
                 "Permissions auto-granted successfully via Shizuku."
             } else {
-                throw RuntimeException("Shizuku command error (exit $exitCode): $error $output")
+                throw RuntimeException(
+                    "Shizuku command error (exit ${result.exitCode}): ${result.error} ${result.output}"
+                )
+            }
+        }
+    }
+
+    /**
+     * Strict single-command runner for TOGGLES: success requires the remote
+     * command to exit 0. Unlike the permission-grant batch above — whose
+     * chatty-but-benign output must be tolerated — a `cmd` call that fails
+     * prints its error on stdout/stderr and exits non-zero, and treating
+     * that chatter as success would make a failed toggle believe itself.
+     */
+    private fun runShizukuCommandStrict(command: String): Result<Unit> {
+        if (!hasPermission()) {
+            return Result.failure(IllegalStateException("Shizuku permission not granted or service binder offline."))
+        }
+        return runCatching {
+            val result = shizukuExec(command)
+            if (result.exitCode != 0) {
+                val detail = listOf(result.error.trim(), result.output.trim())
+                    .filter { it.isNotBlank() }
+                    .joinToString(" ")
+                throw RuntimeException(
+                    if (detail.isBlank()) "exit ${result.exitCode}" else "exit ${result.exitCode}: $detail"
+                )
             }
         }
     }
@@ -225,15 +268,23 @@ object ShizukuManager {
      *
      * On Android 12+ a normal app cannot call BluetoothAdapter.enable()/disable()
      * (they return false even with BLUETOOTH_CONNECT granted), but the `shell`
-     * uid holds BLUETOOTH_PRIVILEGED. Shizuku therefore dispatches the toggle
-     * through the hidden BluetoothManagerService shell commands:
-     *   1. `cmd bluetooth_manager enable|disable` (Android 11+ shell command)
-     *   2. `svc bluetooth enable|disable` (older, still present on current ROMs)
-     * `||` tries the second only when the first fails. No dialogs, no settings
-     * pages, no shade pull-down — the overlay island stays untouched.
+     * uid holds BLUETOOTH_PRIVILEGED. Three mechanisms are tried in order —
+     * the first success wins, and the failure reason of the LAST attempt is
+     * carried back so the menu can surface the exact failing stage:
+     *   1. [TetheringShizukuService.setBluetoothEnabled] — BluetoothAdapter
+     *      called directly in the shell-uid user service over a stable binder
+     *      method (the same mechanism `svc bluetooth` uses internally, but
+     *      without spawning a shell; immune to shell-command changes).
+     *   2. `cmd bluetooth_manager enable|disable` (Android 11+ shell command).
+     *   3. `svc bluetooth enable|disable` (older entry point, still present
+     *      on current ROMs).
      *
-     * @return success when the command chain exited cleanly. Callers MUST still
-     * verify the actual state change via Settings.Global "bluetooth_on".
+     * No dialogs, no settings pages, no shade pull-down — the overlay island
+     * stays untouched.
+     *
+     * @return success when a mechanism dispatched the request and reported
+     * success. Callers MUST still verify the actual state change via
+     * Settings.Global "bluetooth_on".
      */
     suspend fun toggleBluetooth(enable: Boolean): Result<Boolean> = withContext(Dispatchers.IO) {
         if (!isBinderAvailable() || !hasPermission()) {
@@ -242,9 +293,61 @@ object ShizukuManager {
             )
         }
         val action = if (enable) "enable" else "disable"
-        runShizukuCommands(
-            listOf("cmd bluetooth_manager $action || svc bluetooth $action")
-        ).map { true }
+
+        // Plan A — BluetoothAdapter in the shell-uid user service.
+        val adapterResult = runCatching {
+            tetheringUserService()?.setBluetoothEnabled(enable)
+        }.onFailure { error ->
+            android.util.Log.w("ShizukuManager", "Bluetooth user service call failed", error)
+            // Dead binder: drop the cache so the next toggle rebinds fresh.
+            tetheringServiceBinder = null
+        }.getOrNull()
+        if (adapterResult == true) return@withContext Result.success(true)
+
+        // Plan B — hidden BluetoothManagerService shell command (Android 11+).
+        val viaCmd = runShizukuCommandStrict("cmd bluetooth_manager $action")
+        if (viaCmd.isSuccess) return@withContext Result.success(true)
+
+        // Plan C — legacy svc entry point.
+        val viaSvc = runShizukuCommandStrict("svc bluetooth $action")
+        if (viaSvc.isSuccess) return@withContext Result.success(true)
+
+        Result.failure(
+            IllegalStateException(
+                viaSvc.exceptionOrNull()?.message
+                    ?: viaCmd.exceptionOrNull()?.message
+                    ?: if (adapterResult == false) "adapter refused" else "user service unreachable"
+            )
+        )
+    }
+
+    /**
+     * Hides or restores the status bar's clock, system icons and notification
+     * icons, so the island can take the status bar's place.
+     *
+     * Mechanism: the platform's StatusBarShellCommand
+     * (`cmd statusbar send-disable-flag <flags>`) — a shell-only entry point
+     * (the disable flags it writes are guarded by system permissions normal
+     * apps do not hold), so it is dispatched through Shizuku. `~`-prefixed
+     * flags REMOVE the matching bit, which is how the icons are restored
+     * without touching any other disable state the system may hold.
+     *
+     * The platform clears every caller's disable flags on reboot / SystemUI
+     * restart; the saved preference is re-applied on boot by AutostartReceiver
+     * once Shizuku is reachable.
+     *
+     * @param hide true hides the three groups, false restores them.
+     */
+    suspend fun sendStatusBarDisableFlags(hide: Boolean): Result<Unit> = withContext(Dispatchers.IO) {
+        if (!isBinderAvailable() || !hasPermission()) {
+            return@withContext Result.failure(
+                IllegalStateException("Shizuku unavailable")
+            )
+        }
+        val negate = if (hide) "" else "~"
+        val args = listOf("system-icons", "clock", "notification-icons")
+            .joinToString(" ") { "$negate$it" }
+        runShizukuCommandStrict("cmd statusbar send-disable-flag $args")
     }
 
     /**
@@ -458,6 +561,6 @@ object ShizukuManager {
     private var tetheringServiceConnection: ServiceConnection? = null
 
     /** Bump whenever [TetheringShizukuService] or its AIDL changes shape. */
-    private const val USER_SERVICE_VERSION = 3
+    private const val USER_SERVICE_VERSION = 4
     private const val USER_SERVICE_BIND_TIMEOUT_MS = 6000L
 }

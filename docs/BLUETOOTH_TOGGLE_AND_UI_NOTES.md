@@ -19,33 +19,36 @@ there is no consent dialog for the disable direction. `Settings.Panel`
 (`ACTION_BLUETOOTH`) is a system dialog and requires user interaction —
 rejected because the info menu must never be covered by dialogs.
 
-### Implemented solution — Shizuku shell path (preferred)
+### Implemented solution — Shizuku path (preferred, three mechanisms)
 
 The device runs Shizuku with the `moe.shizuku.manager.permission.API_V23`
 permission granted to Smart Island. Shell (`shell` uid) holds
-`BLUETOOTH_PRIVILEGED`, so the toggle is dispatched through the hidden
-BluetoothManagerService shell commands:
+`BLUETOOTH_PRIVILEGED`, so the toggle is dispatched through, in order:
 
-1. `cmd bluetooth_manager enable|disable` (Android 11+ shell command)
-2. `svc bluetooth enable|disable` (older entry point, still present on
+1. `ITetheringUserService.setBluetoothEnabled()` — BluetoothAdapter called
+   directly inside the shell-uid user service over a stable binder method
+   (the same mechanism `svc bluetooth` uses internally, without spawning a
+   shell; immune to shell-command changes)
+2. `cmd bluetooth_manager enable|disable` (Android 11+ shell command)
+3. `svc bluetooth enable|disable` (older entry point, still present on
    current ROMs)
 
-Chained with `||` in `ShizukuManager.toggleBluetooth()` so the second is
-tried when the first is unavailable. No dialogs, no settings pages, no shade
-pull-down — the overlay window is never touched, the island stays visible,
-and the info menu stays open.
+The first success wins in `ShizukuManager.toggleBluetooth()`; the failure
+reason of the last attempt is carried back for the in-menu feedback. No
+dialogs, no settings pages, no shade pull-down — the overlay window is never
+touched, the island stays visible, and the info menu stays open.
 
 Verification is permission-free: the state is polled via
 `Settings.Global "bluetooth_on"` (readable without any Bluetooth permission)
 for up to 4 s. Because the test device suppresses Toasts for this app, the
 result ("Turning Bluetooth on…", "Bluetooth on", "Couldn't toggle
-Bluetooth") is rendered inside the island menu itself (`IslandViewModel
-.postMenuFeedback` → `IdleInfoExpanded`).
+Bluetooth — <stage>") is rendered inside the island menu itself
+(`IslandViewModel.postMenuFeedback` → `IdleInfoExpanded`).
 
-### Fallback — Quick Settings tile gesture
+### Fallback — Quick Settings tile gesture (Shizuku offline only)
 
-If Shizuku is not running (`isBinderAvailable()` false) or the command chain
-fails, the accessibility service falls back to the QS tile flow:
+If Shizuku is not running (`isBinderAvailable()` false), the accessibility
+service falls back to the QS tile flow:
 
 1. `GLOBAL_ACTION_QUICK_SETTINGS` opens the panel.
 2. `waitForQuickSettings()` waits (≤ 2.5 s) for the full-screen SystemUI

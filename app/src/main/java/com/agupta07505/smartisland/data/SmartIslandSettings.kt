@@ -63,7 +63,8 @@ data class SmartIslandSettings(
     val idleInfoShowTime: Boolean = true,
     val idleInfoShowBattery: Boolean = true,
     val idleInfoShowBluetooth: Boolean = true,
-    val idleInfoShowHotspot: Boolean = true
+    val idleInfoShowHotspot: Boolean = true,
+    val statusBarIconsHidden: Boolean = false
 ) {
     companion object {
         val Default = SmartIslandSettings()

@@ -91,6 +91,39 @@ class TetheringShizukuService(private val context: Context) : ITetheringUserServ
         }
     }
 
+    /**
+     * Toggles the Bluetooth radio in the shell-uid process. The adapter calls
+     * are public API (deprecated since API 33, but still dispatched and the
+     * only direct mechanism for a privileged caller); hidden-API enforcement
+     * does not apply in this process anyway.
+     *
+     * enable()/disable() return false both when the request is REFUSED and
+     * when the radio is ALREADY in the requested state, so a false answer is
+     * disambiguated through the permission-free Settings.Global "bluetooth_on"
+     * read (the same switch the app polls): already-in-target-state counts as
+     * success so the caller's own verification never races a no-op.
+     */
+    override fun setBluetoothEnabled(enable: Boolean): Boolean {
+        return runCatching {
+            val adapter = android.bluetooth.BluetoothAdapter.getDefaultAdapter()
+                ?: return false
+            val accepted = if (enable) adapter.enable() else adapter.disable()
+            accepted || isBluetoothOn() == enable
+        }.getOrElse {
+            Log.e(TAG, "setBluetoothEnabled($enable) failed", it)
+            false
+        }
+    }
+
+    /** Permission-free Bluetooth state read (Settings.Global "bluetooth_on"). */
+    private fun isBluetoothOn(): Boolean = runCatching {
+        android.provider.Settings.Global.getInt(
+            context.contentResolver,
+            "bluetooth_on",
+            0
+        ) != 0
+    }.getOrDefault(false)
+
     override fun exit() {
         System.exit(0)
     }

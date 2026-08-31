@@ -93,6 +93,7 @@ class SmartIslandSettingsRepository(private val context: Context) {
         val IdleInfoShowBattery = booleanPreferencesKey("idle_info_show_battery")
         val IdleInfoShowBluetooth = booleanPreferencesKey("idle_info_show_bluetooth")
         val IdleInfoShowHotspot = booleanPreferencesKey("idle_info_show_hotspot")
+        val StatusBarIconsHidden = booleanPreferencesKey("status_bar_icons_hidden")
     }
 
     val settings: Flow<SmartIslandSettings> = context.smartIslandDataStore.data
@@ -237,7 +238,8 @@ class SmartIslandSettingsRepository(private val context: Context) {
                 idleInfoShowTime = prefs[Keys.IdleInfoShowTime] ?: defaults.idleInfoShowTime,
                 idleInfoShowBattery = prefs[Keys.IdleInfoShowBattery] ?: defaults.idleInfoShowBattery,
                 idleInfoShowBluetooth = prefs[Keys.IdleInfoShowBluetooth] ?: defaults.idleInfoShowBluetooth,
-                idleInfoShowHotspot = prefs[Keys.IdleInfoShowHotspot] ?: defaults.idleInfoShowHotspot
+                idleInfoShowHotspot = prefs[Keys.IdleInfoShowHotspot] ?: defaults.idleInfoShowHotspot,
+                statusBarIconsHidden = prefs[Keys.StatusBarIconsHidden] ?: defaults.statusBarIconsHidden
             )
         }
 
@@ -485,6 +487,9 @@ class SmartIslandSettingsRepository(private val context: Context) {
     }
     suspend fun setIdleInfoShowHotspot(value: Boolean) = editSafely {
         it[Keys.IdleInfoShowHotspot] = value
+    }
+    suspend fun setStatusBarIconsHidden(value: Boolean) = editSafely {
+        it[Keys.StatusBarIconsHidden] = value
     }
 
     suspend fun resetPosition() = editSafely {

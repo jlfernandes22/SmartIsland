@@ -57,7 +57,6 @@ import kotlinx.coroutines.withContext
 
 private data class IdleDeviceState(
     val timeText: String,
-    val dateText: String,
     val batteryText: String,
     val batteryCharging: Boolean,
     val bluetoothText: String,
@@ -132,7 +131,7 @@ fun IdleInfoExpanded(
     // probes; run them on IO so the 1s menu refresh never janks the overlay's
     // main thread.
     val state by produceState(
-        initialValue = IdleDeviceState("", "", "", false, "", false, "")
+        initialValue = IdleDeviceState("", "", false, "", false, "")
     ) {
         while (true) {
             value = withContext(Dispatchers.IO) { readDeviceState(context) }
@@ -334,7 +333,6 @@ private fun ToggleTile(
 private fun readDeviceState(context: Context): IdleDeviceState {
     val now = System.currentTimeMillis()
     val timeText = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(now))
-    val dateText = SimpleDateFormat("EEEE, MMM d", Locale.getDefault()).format(Date(now))
 
     var batteryText = "--"
     var batteryCharging = false
@@ -397,7 +395,6 @@ private fun readDeviceState(context: Context): IdleDeviceState {
 
     return IdleDeviceState(
         timeText = timeText,
-        dateText = dateText,
         batteryText = batteryText,
         batteryCharging = batteryCharging,
         bluetoothText = bluetoothText,

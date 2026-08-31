@@ -63,11 +63,13 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+      # Installable APK on EVERY run (push/PR/manual) — no signing secrets
+      # required to grab and side-load the latest build.
       - name: Upload debug APK
-        if: ${{ github.event_name == 'pull_request' || github.ref == 'refs/heads/dev' }}
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
-          name: SmartIsland-Debug-apk
+          name: SmartIsland-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 14
@@ -84,6 +86,7 @@ jobs:
     outputs:
       apk_name: ${{ steps.version.outputs.apk_name }}
       version_tag: ${{ steps.version.outputs.version_tag }}
+      can_sign: ${{ steps.secrets.outputs.can_sign }}
 
     steps:
       - name: Check out repository
@@ -116,15 +119,21 @@ jobs:
           echo "version_tag=$VERSION_TAG" >> "$GITHUB_OUTPUT"
           echo "apk_name=SmartIsland-$VERSION_TAG.apk" >> "$GITHUB_OUTPUT"
 
-      - name: Validate signing secrets
+      - name: Check signing secrets
+        id: secrets
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
         run: |
-          : "${ANDROID_KEYSTORE_BASE64:?ANDROID_KEYSTORE_BASE64 is not configured}"
-          : "${ANDROID_KEYSTORE_PASSWORD:?ANDROID_KEYSTORE_PASSWORD is not configured}"
+          if [[ -z "${ANDROID_KEYSTORE_BASE64:-}" || -z "${ANDROID_KEYSTORE_PASSWORD:-}" ]]; then
+            echo "::warning::Release signing secrets (ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD) are not configured — the signed release is SKIPPED, not failed. The installable debug APK is available in the 'verify' job artifacts. To enable signed releases, see docs/RELEASE_SIGNING.md."
+            echo "can_sign=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "can_sign=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Prepare release signing
+        if: steps.secrets.outputs.can_sign == 'true'
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
@@ -141,9 +150,11 @@ jobs:
           echo "SIGNING_KEY_PASSWORD=$ANDROID_KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
 
       - name: Build signed release APK
+        if: steps.secrets.outputs.can_sign == 'true'
         run: ./gradlew --no-daemon --stacktrace assembleRelease
 
       - name: Verify and stage APK
+        if: steps.secrets.outputs.can_sign == 'true'
         run: |
           SOURCE_APK="app/build/outputs/apk/release/app-release.apk"
           OUTPUT_APK="app/build/outputs/apk/release/$APK_NAME"
@@ -154,6 +165,7 @@ jobs:
           "$APKSIGNER" verify --verbose --print-certs "$OUTPUT_APK"
 
       - name: Upload release APK
+        if: steps.secrets.outputs.can_sign == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: SmartIsland-release-${{ github.run_attempt }}
@@ -163,7 +175,7 @@ jobs:
 
   publish:
     name: Publish GitHub release
-    if: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') }}
+    if: ${{ needs.release.outputs.can_sign == 'true' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
     needs: release
     runs-on: ubuntu-latest
     timeout-minutes: 10

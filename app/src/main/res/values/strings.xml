@@ -273,6 +273,8 @@
     <string name="idle_info_battery_title">Show Battery Level</string>
     <string name="idle_info_bluetooth_title">Show Bluetooth Status</string>
     <string name="idle_info_hotspot_title">Show Hotspot Toggle</string>
+    <string name="statusbar_icons_title">Hide status bar icons</string>
+    <string name="statusbar_icons_desc">Hides the clock, system icons and notification icons so the island can take the status bar\'s place. Needs Shizuku. Icons come back after a reboot and are hidden again automatically once Shizuku is up.</string>
 
     <!-- Notifications & Privacy Rules -->
     <string name="oem_rules_title">Device Profile &amp; OEM Rules</string>

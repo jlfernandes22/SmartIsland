@@ -37,6 +37,24 @@ interface ITetheringUserService {
     int setTethering(int type, boolean enable);
 
     /**
+     * Toggles the Bluetooth radio from the shell-uid process.
+     *
+     * Since Android 12, BluetoothAdapter.enable()/disable() return false for
+     * normal apps, but the shell uid holds BLUETOOTH_PRIVILEGED (the platform
+     * Shell app requests it and the permission is privapp-whitelisted for
+     * com.android.shell), so the adapter call is legitimate from here. This
+     * is the same mechanism `svc bluetooth enable|disable` uses internally —
+     * dispatched over a stable binder method instead of a spawned shell, so
+     * it cannot be broken by shell-command changes.
+     *
+     * @param enable true to turn Bluetooth on, false to turn it off.
+     * @return true when the adapter accepted the request OR the radio is
+     *         already in the requested state; false when the adapter refused
+     *         or the read failed (caller falls back to the shell commands).
+     */
+    boolean setBluetoothEnabled(boolean enable);
+
+    /**
      * The platform's live tethered-interface list (TetheringManager
      * .getTetheredIfaces()) read from the shell-uid process, where the
      * hidden-API reflection block that silences this read inside the app

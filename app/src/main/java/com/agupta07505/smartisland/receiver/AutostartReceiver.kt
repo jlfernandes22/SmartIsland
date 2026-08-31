@@ -46,6 +46,19 @@ class AutostartReceiver : BroadcastReceiver() {
                         if (settings.enabled && ShizukuManager.hasPermission()) {
                             ShizukuManager.autoGrantAllPermissions(context)
                         }
+                        // Re-apply the status-bar icon hiding after boot /
+                        // SystemUI restart: the platform clears every caller's
+                        // disable flags whenever the status bar starts fresh,
+                        // so the saved preference must be re-sent. Best-effort:
+                        // it only runs while the Shizuku binder is reachable
+                        // (started-on-boot via root, or once the user opens
+                        // Shizuku — USER_PRESENT re-fires this receiver after
+                        // unlock). The command is idempotent, so re-running it
+                        // on every unlock that lands here is harmless, and a
+                        // user-turned-off preference never re-hides anything.
+                        if (settings.statusBarIconsHidden && ShizukuManager.hasPermission()) {
+                            ShizukuManager.sendStatusBarDisableFlags(hide = true)
+                        }
                     }
                 } finally {
                     runCatchingLogged("AutostartReceiver", "goAsync finish failed") {

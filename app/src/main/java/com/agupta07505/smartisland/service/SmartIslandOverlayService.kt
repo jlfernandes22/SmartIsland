@@ -1019,20 +1019,27 @@ class SmartIslandOverlayService : AccessibilityService() {
      * Toggles Bluetooth from the idle info menu. The island never hides and the
      * menu never closes — the toggle runs entirely behind the overlay.
      *
-     * Preferred path — Shizuku: with shell-level privileges the hidden
-     * BluetoothManagerService commands (`cmd bluetooth_manager enable|disable`,
-     * `svc bluetooth enable|disable`) work in both directions on Android 12+,
-     * where BluetoothAdapter.enable()/disable() return false for normal apps.
-     * No dialogs, no settings pages, no shade pull-down.
+     * Preferred path — Shizuku, three mechanisms tried in order: the shell-uid
+     * user service's BluetoothAdapter call (see TetheringShizukuService
+     * .setBluetoothEnabled), the hidden BluetoothManagerService commands
+     * (`cmd bluetooth_manager enable|disable`), then `svc bluetooth
+     * enable|disable`. All work in both directions on Android 12+, where
+     * BluetoothAdapter.enable()/disable() return false for normal apps. No
+     * dialogs, no settings pages, no shade pull-down.
      *
-     * Fallback path — Quick Settings tile: the accessibility service opens QS,
-     * waits for the shade window, locates the Bluetooth tile (scrolling the
-     * tile carousel if needed) and taps it with a synthetic gesture while the
-     * island window carries FLAG_NOT_TOUCHABLE (suppressShadeHide also keeps
-     * the island visible). QS is closed again with GLOBAL_ACTION_BACK.
+     * Fallback path — Quick Settings tile: used ONLY when Shizuku is entirely
+     * offline (no binder). The accessibility service opens QS, waits for the
+     * shade window, locates the Bluetooth tile (scrolling the tile carousel
+     * if needed) and taps it with a synthetic gesture while the island window
+     * carries FLAG_NOT_TOUCHABLE (suppressShadeHide also keeps the island
+     * visible). QS is closed again with GLOBAL_ACTION_BACK. When Shizuku IS
+     * reachable but every mechanism failed, the exact failure reason is shown
+     * in-menu instead — the user must never see the QS panel from a failed
+     * toggle (same rule as the hotspot toggle).
      *
-     * Both paths verify the result through the permission-free
-     * Settings.Global "bluetooth_on" switch and the fallback retries the tap.
+     * The Shizuku path verifies the result through the permission-free
+     * Settings.Global "bluetooth_on" switch and reports the failing stage
+     * in-menu on failure.
      */
     private fun toggleBluetoothViaShade() {
         // Keep the island fully visible; make its window transparent to touches
@@ -1050,16 +1057,26 @@ class SmartIslandOverlayService : AccessibilityService() {
                     )
                 }
                 var changed = false
+                var shizukuAvailable = false
+                var shizukuReason: String? = null
 
                 // 1) Shizuku: shell-privileged toggle — reliable both ways.
                 //    Availability + permission are checked inside, on IO.
                 if (ShizukuManager.isBinderAvailable()) {
+                    shizukuAvailable = true
                     val dispatched = ShizukuManager.toggleBluetooth(!before)
-                    changed = dispatched.isSuccess && waitForBluetoothState(!before, timeoutMs = 4000L)
+                    if (dispatched.isSuccess) {
+                        changed = waitForBluetoothState(!before, timeoutMs = 4000L)
+                        if (!changed) {
+                            shizukuReason = "state did not change within 4s"
+                        }
+                    } else {
+                        shizukuReason = dispatched.exceptionOrNull()?.message
+                    }
                     android.util.Log.d(
                         TAG,
                         "Shizuku bluetooth toggle: dispatched=${dispatched.isSuccess} changed=$changed " +
-                            "(reason=${dispatched.exceptionOrNull()?.message ?: "ok"})"
+                            "(reason=${shizukuReason ?: "ok"})"
                     )
                 } else {
                     android.util.Log.d(
@@ -1069,8 +1086,13 @@ class SmartIslandOverlayService : AccessibilityService() {
                     )
                 }
 
-                // 2) Fallback: pull down Quick Settings and tap the Bluetooth tile.
-                if (!changed) {
+                // 2) Fallback: pull down Quick Settings and tap the Bluetooth
+                //    tile — ONLY when Shizuku is entirely offline (no binder).
+                //    When Shizuku IS up but every mechanism failed, the exact
+                //    failure reason is shown in-menu instead: the user must
+                //    never see the QS panel from a failed toggle (same rule
+                //    as the hotspot toggle).
+                if (!changed && !shizukuAvailable) {
                     changed = toggleBluetoothViaQsTile(before)
                 }
 
@@ -1081,7 +1103,10 @@ class SmartIslandOverlayService : AccessibilityService() {
                         // auto-collapse window so the menu does not linger.
                         viewModel.resetAutoCollapseTimer()
                     } else {
-                        viewModel.postMenuFeedback("Couldn't toggle Bluetooth")
+                        viewModel.postMenuFeedback(
+                            if (shizukuReason.isNullOrBlank()) "Couldn't toggle Bluetooth"
+                            else "Couldn't toggle Bluetooth — $shizukuReason"
+                        )
                     }
                 }
             }
