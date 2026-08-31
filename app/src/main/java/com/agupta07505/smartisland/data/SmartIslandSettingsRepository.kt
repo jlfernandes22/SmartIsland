@@ -82,6 +82,7 @@ class SmartIslandSettingsRepository(private val context: Context) {
         val UseCutoutSizeWhenIdle = booleanPreferencesKey("use_cutout_size_when_idle")
         val IdleWidth = floatPreferencesKey("idle_width")
         val IdleHeight = floatPreferencesKey("idle_height")
+        val IdleYOffset = floatPreferencesKey("idle_y_offset")
         val IdleSizeAutoDetected = booleanPreferencesKey("idle_size_auto_detected")
         val HideWhenShadeOpen = booleanPreferencesKey("hide_when_shade_open")
         val SwipeUpAction = stringPreferencesKey("swipe_up_action")
@@ -217,6 +218,12 @@ class SmartIslandSettingsRepository(private val context: Context) {
                     defaults.idleHeight,
                     SmartIslandSettings.MIN_IDLE_HEIGHT,
                     SmartIslandSettings.MAX_HEIGHT
+                ),
+                idleYOffset = validDimension(
+                    prefs[Keys.IdleYOffset],
+                    defaults.idleYOffset,
+                    SmartIslandSettings.MIN_IDLE_Y_OFFSET,
+                    SmartIslandSettings.MAX_Y_OFFSET
                 ),
                 idleSizeAutoDetected = prefs[Keys.IdleSizeAutoDetected] ?: defaults.idleSizeAutoDetected,
                 hideWhenShadeOpen = prefs[Keys.HideWhenShadeOpen] ?: defaults.hideWhenShadeOpen,
@@ -448,6 +455,16 @@ class SmartIslandSettingsRepository(private val context: Context) {
             SmartIslandSettings.Default.idleHeight,
             SmartIslandSettings.MIN_IDLE_HEIGHT,
             SmartIslandSettings.MAX_HEIGHT
+        )
+    }
+
+    /** Vertical position of the idle pill, independent from the wide island's yOffset. */
+    suspend fun setIdleYOffset(value: Float) = editSafely {
+        it[Keys.IdleYOffset] = validDimension(
+            value,
+            SmartIslandSettings.Default.idleYOffset,
+            SmartIslandSettings.MIN_IDLE_Y_OFFSET,
+            SmartIslandSettings.MAX_Y_OFFSET
         )
     }
     suspend fun setIdleSizeAutoDetected(value: Boolean) = editSafely {

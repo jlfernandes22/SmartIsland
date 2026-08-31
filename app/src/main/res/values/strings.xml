@@ -160,7 +160,7 @@
     <string name="slider_island_width">Island Width</string>
     <string name="slider_island_height">Island Height</string>
     <string name="slider_horizontal_offset">Horizontal (X) Offset</string>
-    <string name="slider_vertical_offset">Vertical (Y) Offset</string>
+    <string name="slider_vertical_offset">Wide Island Vertical (Y) Offset</string>
     <string name="slider_corner_radius">Corner Radius</string>
     <string name="slider_island_opacity">Island Opacity &amp; Transparency</string>
     <string name="toggle_drop_shadow_title">Island Drop Shadow</string>
@@ -179,6 +179,7 @@
     <string name="toast_cutout_not_detected">No hardware cutout reported; using defaults</string>
     <string name="slider_idle_width">Idle Pill Width</string>
     <string name="slider_idle_height">Idle Pill Height</string>
+    <string name="slider_idle_y_offset">Idle Pill Vertical Offset</string>
 
     <!-- Customizations / Studio -->
     <string name="opacity_card_title">Island Opacity &amp; Transparency</string>

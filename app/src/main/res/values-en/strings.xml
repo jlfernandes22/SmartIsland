@@ -160,7 +160,7 @@
     <string name="slider_island_width">Island Width</string>
     <string name="slider_island_height">Island Height</string>
     <string name="slider_horizontal_offset">Horizontal (X) Offset</string>
-    <string name="slider_vertical_offset">Vertical (Y) Offset</string>
+    <string name="slider_vertical_offset">Wide Island Vertical (Y) Offset</string>
     <string name="slider_corner_radius">Corner Radius</string>
     <string name="slider_island_opacity">Island Opacity &amp; Transparency</string>
     <string name="toggle_drop_shadow_title">Island Drop Shadow</string>

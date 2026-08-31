@@ -33,11 +33,25 @@ data class DetectedCutoutInfo(
 object CameraCutoutDetector {
 
     private const val TAG = "CameraCutoutDetector"
-    private const val CUTOUT_PADDING_W_DP = 6f
-    private const val CUTOUT_PADDING_H_DP = 10f
+    // Slim paddings: the pill must HUG the camera hole. The old 10dp height
+    // padding made every detected pill a third taller than the actual cutout
+    // (the "height identified incorrectly" report).
+    private const val CUTOUT_PADDING_W_DP = 4f
+    private const val CUTOUT_PADDING_H_DP = 3f
+    // A real punch hole is never shorter than this; some ROMs report the
+    // cutout rect as the full status-bar inset, which would otherwise clamp
+    // the pill to a status-bar-sized slab.
+    private const val MIN_CUTOUT_HEIGHT_DP = 14f
 
     /**
      * Calculates the physical pill position and dimensions matching the device's camera cutout coordinates.
+     *
+     * [yOffsetDp] is the WINDOW y that CENTERS the pill on the hole
+     * (holeCenterY - pillHeight/2). It may be slightly negative — the overlay
+     * window carries FLAG_LAYOUT_NO_LIMITS, so a y above the screen top still
+     * renders correctly. The old code returned the raw hole top, which sat the
+     * pill BELOW the camera (the window applies this offset, and the hole
+     * starts at y=0).
      */
     fun calculateCutoutOffset(
         left: Int,
@@ -58,18 +72,19 @@ object CameraCutoutDetector {
             SmartIslandSettings.MAX_X_OFFSET
         )
 
-        val yOffsetDp = (top.toFloat() / density).coerceIn(
-            SmartIslandSettings.MIN_Y_OFFSET,
-            SmartIslandSettings.MAX_Y_OFFSET
-        )
-
         val widthDp = ((right - left).toFloat() / density + CUTOUT_PADDING_W_DP).coerceIn(
             SmartIslandSettings.MIN_IDLE_WIDTH,
             SmartIslandSettings.MAX_WIDTH
         )
         val heightDp = ((bottom - top).toFloat() / density + CUTOUT_PADDING_H_DP).coerceIn(
-            SmartIslandSettings.MIN_IDLE_HEIGHT,
+            MIN_CUTOUT_HEIGHT_DP,
             SmartIslandSettings.MAX_HEIGHT
+        )
+
+        val holeCenterYDp = (top + bottom) / 2f / density
+        val yOffsetDp = (holeCenterYDp - heightDp / 2f).coerceIn(
+            SmartIslandSettings.MIN_IDLE_Y_OFFSET,
+            SmartIslandSettings.MAX_Y_OFFSET
         )
 
         return DetectedCutoutInfo(

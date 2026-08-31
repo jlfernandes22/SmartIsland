@@ -373,29 +373,6 @@ class SmartIslandOverlayService : AccessibilityService() {
         }
 
         serviceScope.launch {
-            runSuspendCatchingLogged(TAG, "Idle cutout auto-detect collector failed") {
-                repository.settings.collect { settings ->
-                    if (destroyed) return@collect
-                    if (!settings.enabled || !settings.useCutoutSizeWhenIdle || settings.idleSizeAutoDetected) {
-                        return@collect
-                    }
-                    val detected = com.agupta07505.smartisland.util.CameraCutoutDetector.detectAsync(this@SmartIslandOverlayService)
-                    if (detected.hasHardwareCutout) {
-                        repository.setIdleSize(detected.widthDp, detected.heightDp)
-                        repository.setIdleSizeAutoDetected(true)
-                        if (::viewModel.isInitialized) {
-                            updateWindowLayoutParams(isWindowExpanded, viewModel.settings.value)
-                        }
-                        android.util.Log.d(
-                            TAG,
-                            "Idle cutout auto-detected: ${detected.widthDp}x${detected.heightDp}dp"
-                        )
-                    }
-                }
-            }
-        }
-
-        serviceScope.launch {
             runSuspendCatchingLogged(TAG, "Expanded-state collector failed") {
                 viewModel.expanded.collectLatest { expanded ->
                     if (destroyed || !viewModel.settings.value.enabled) {
@@ -654,12 +631,20 @@ class SmartIslandOverlayService : AccessibilityService() {
                         val notificationsCount = viewModel.notifications.value.size
                         val isSplitMode = notificationsCount >= 2
 
-                        val mainWidthPx = settingsVal.width * density
+                        // IDLE pill awareness: with no notifications and the
+                        // cutout-size mode on, the RENDERED pill is the idle
+                        // one (IslandOverlayView effectiveWidth/Height) — the
+                        // touch region must match it, not the wide island.
+                        val isIdlePill = notificationsCount == 0 && settingsVal.useCutoutSizeWhenIdle
+                        val pillWidthDp = if (isIdlePill) settingsVal.idleWidth else settingsVal.width
+                        val pillHeightDp = if (isIdlePill) settingsVal.idleHeight else settingsVal.height
+
+                        val mainWidthPx = pillWidthDp * density
                         // Same group width as collapsedParams(): with 3+
                         // notifications the tertiary circle is drawn too and
                         // must stay inside the touchable region.
                         val groupWidthPx = (
-                            settingsVal.width + when {
+                            pillWidthDp + when {
                                 notificationsCount >= 3 -> 2 * (8f + settingsVal.height)
                                 isSplitMode -> 8f + settingsVal.height
                                 else -> 0f
@@ -667,7 +652,7 @@ class SmartIslandOverlayService : AccessibilityService() {
                         ) * density
                         val edgePaddingPx = 8f * density
                         val touchPaddingPx = 6f * density
-                        val pillHeightPx = (settingsVal.height + 16f) * density
+                        val pillHeightPx = (pillHeightDp + 16f) * density
 
                         val desiredMainLeftPx = screenWidth / 2f +
                             settingsVal.xOffset * density - mainWidthPx / 2f
@@ -826,12 +811,14 @@ class SmartIslandOverlayService : AccessibilityService() {
             WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED or
             (if (suppressShadeHide) WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE else 0)
 
-        // WINDOW CENTERING INVARIANT: x is 0 in every state. The expanded and
-        // collapsed windows share the screen center, so the delayed
-        // expanded→collapsed resize cannot displace the screen-anchored
-        // content — only its clip bounds change (see the class-level comment).
-        val currentX = 0
-        val currentY = settings.yOffset.dpToPx()
+        // WINDOW-Y DECOUPLING: the overlay window always sits at the IDLE
+        // pill's y (settings.idleYOffset). The wide island's yOffset is applied
+        // INSIDE Compose (IslandOverlayView adds yOffset - idleYOffset to the
+        // expanded card's top offset), so the window itself NEVER moves — the
+        // precision-tuning "wide island Y" slider can no longer drag the idle
+        // punch-hole pill with it, and no window position transient can ghost
+        // or snap the morph either.
+        val currentY = settings.idleYOffset.dpToPx()
         val currentSoftInputMode = if (isInput) {
             WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE or
                 WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE
@@ -839,6 +826,7 @@ class SmartIslandOverlayService : AccessibilityService() {
             0
         }
 
+        val currentX = 0
         val lp = lastParams
         if (lp != null &&
             lp.width == w &&
@@ -965,7 +953,12 @@ class SmartIslandOverlayService : AccessibilityService() {
         notificationCount: Int,
         density: Float
     ): Int {
-        val mainWidthPx = settings.width * density
+        // Idle pill awareness: mirrors IslandOverlayView's effectiveWidth so
+        // the narrow window never clips a cutout-sized idle pill (which can
+        // be wider or narrower than the wide island).
+        val isIdlePill = notificationCount == 0 && settings.useCutoutSizeWhenIdle
+        val mainWidthDp = if (isIdlePill) settings.idleWidth else settings.width
+        val mainWidthPx = mainWidthDp * density
         val circleSizePx = settings.height * density
         val compactGapPx = 8f * density
         val companionExtraPx = when {
@@ -1027,7 +1020,7 @@ class SmartIslandOverlayService : AccessibilityService() {
 
         return WindowManager.LayoutParams(
             w,
-            ((settings.height + 16f) * density).toInt(),
+            h,
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             currentFlags,
             PixelFormat.TRANSLUCENT
@@ -1035,7 +1028,9 @@ class SmartIslandOverlayService : AccessibilityService() {
             gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
             // WINDOW CENTERING INVARIANT: x = 0 in every window state.
             x = 0
-            y = settings.yOffset.dpToPx()
+            // Window always sits at the IDLE pill y (see updateWindowLayoutParams):
+            // the wide island's yOffset is applied inside Compose instead.
+            y = settings.idleYOffset.dpToPx()
         }.also {
             lastParams = it
         }
@@ -1273,6 +1268,7 @@ class SmartIslandOverlayService : AccessibilityService() {
         // shell-level privileges and needs no app permission — the grants
         // unblock the in-app state reads).
         maybeRequestTogglePermissions()
+        hotspotLateVerifyJob?.cancel()
         serviceScope.launch {
             runSuspendCatchingLogged(TAG, "$label toggle failed") {
                 val before = readTetheringStateLive()
@@ -1301,6 +1297,32 @@ class SmartIslandOverlayService : AccessibilityService() {
                             if (reason.isNullOrBlank()) "Couldn't toggle $label"
                             else "Couldn't toggle $label — $reason"
                         )
+                        // LATE-APPROVAL VERIFICATION: a carrier approval that
+                        // lands after the dispatcher gave up (dialog read
+                        // slowly, provisioning app cold start) still turns the
+                        // hotspot ON — the previous code left the error line up
+                        // forever even though the hotspot came on, which read
+                        // as "carrier approval required even after granting".
+                        // Poll the authoritative iface list for a while and
+                        // flip the feedback to success the moment it appears.
+                        if (target) {
+                            hotspotLateVerifyJob = serviceScope.launch {
+                                runSuspendCatchingLogged(TAG, "$label late verify failed") {
+                                    val deadline = System.currentTimeMillis() +
+                                        HOTSPOT_LATE_VERIFY_MS
+                                    while (System.currentTimeMillis() < deadline) {
+                                        kotlinx.coroutines.delay(2000L)
+                                        if (readTetheringStateLive() == true) {
+                                            if (::viewModel.isInitialized) {
+                                                viewModel.postMenuFeedback("$label on")
+                                                viewModel.resetAutoCollapseTimer()
+                                            }
+                                            return@runSuspendCatchingLogged
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 android.util.Log.d(
@@ -1311,6 +1333,9 @@ class SmartIslandOverlayService : AccessibilityService() {
             }
         }
     }
+
+    /** Late hotspot-approval verifier; cancelled by the next toggle. */
+    private var hotspotLateVerifyJob: kotlinx.coroutines.Job? = null
 
     /**
      * Launches MainActivity (single top) with the toggle-permissions extra
@@ -1815,6 +1840,11 @@ class SmartIslandOverlayService : AccessibilityService() {
         // first layout at the NEW size before the mask is dropped anyway.
         private const val WINDOW_MASK_SETTLE_MS = 40L
         private const val WINDOW_MASK_MAX_WAIT_MS = 150L
+
+        // How long the toggle keeps polling the authoritative tethered-iface
+        // list after a failed dispatch: a carrier approval granted after the
+        // dispatcher's answer window still brings the hotspot up.
+        private const val HOTSPOT_LATE_VERIFY_MS = 45_000L
     }
 
     /**

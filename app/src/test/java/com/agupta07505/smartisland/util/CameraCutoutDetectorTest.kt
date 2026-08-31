@@ -31,11 +31,13 @@ class CameraCutoutDetectorTest {
         assertTrue(result.hasHardwareCutout)
         // Center X = 540, Screen Center X = 540 -> xOffsetPx = 0 -> xOffsetDp = 0
         assertEquals(0f, result.xOffsetDp, 0.01f)
-        assertEquals(0f, result.yOffsetDp, 0.01f)
-        // width = 100px / 2.75 + 6dp padding = ~42.36dp (no longer clamped to the content-pill minimum)
-        assertEquals(42.36f, result.widthDp, 0.01f)
-        // height = 80px / 2.75 + 10dp padding = ~39.09dp
-        assertEquals(39.09f, result.heightDp, 0.01f)
+        // width = 100px / 2.75 + 4dp padding = ~40.36dp (slim hug padding)
+        assertEquals(40.36f, result.widthDp, 0.01f)
+        // height = 80px / 2.75 + 3dp padding = ~32.09dp (was +10dp: too tall to hug the hole)
+        assertEquals(32.09f, result.heightDp, 0.01f)
+        // yOffset centers the pill on the hole: 40/2.75 - 32.09/2 = -1.5dp
+        // (slightly negative is fine — the overlay window has FLAG_LAYOUT_NO_LIMITS)
+        assertEquals(-1.5f, result.yOffsetDp, 0.01f)
     }
 
     @Test
@@ -56,6 +58,43 @@ class CameraCutoutDetectorTest {
         assertTrue(result.hasHardwareCutout)
         // Center X = 90, Screen Center X = 540 -> xOffsetPx = -450 -> xOffsetDp = -180 -> clamped to MIN_X_OFFSET (-140)
         assertEquals(-140f, result.xOffsetDp, 0.01f)
-        assertEquals(4f, result.yOffsetDp, 0.01f) // 10 / 2.5 = 4dp
+        // height = 80px / 2.5 + 3dp = 35dp; hole center = 50/2.5 = 20dp
+        // yOffset = 20 - 35/2 = 2.5dp (pill vertically centered on the hole)
+        assertEquals(2.5f, result.yOffsetDp, 0.01f)
+    }
+
+    @Test
+    fun testFullStatusBarRectDoesNotInflateThePill() {
+        // Some ROMs report the cutout rect as the full status-bar inset. The
+        // width clamps to MAX_WIDTH and the height stays hole-sized, so the
+        // pill never becomes a status-bar-sized slab.
+        val result = CameraCutoutDetector.calculateCutoutOffset(
+            left = 0,
+            top = 0,
+            right = 1080,
+            bottom = 80,
+            screenWidthPx = 1080,
+            density = 2.75f
+        )
+
+        assertTrue(result.hasHardwareCutout)
+        assertEquals(180f, result.widthDp, 0.01f) // clamped to MAX_WIDTH
+        assertEquals(32.09f, result.heightDp, 0.01f)
+    }
+
+    @Test
+    fun testTinyHoleKeepsAMinimumTouchableHeight() {
+        val result = CameraCutoutDetector.calculateCutoutOffset(
+            left = 530,
+            top = 0,
+            right = 550,
+            bottom = 10,
+            screenWidthPx = 1080,
+            density = 2.75f
+        )
+
+        assertTrue(result.hasHardwareCutout)
+        // 10px/2.75 + 3dp = 6.6dp -> clamped to the 14dp hole floor
+        assertEquals(14f, result.heightDp, 0.01f)
     }
 }

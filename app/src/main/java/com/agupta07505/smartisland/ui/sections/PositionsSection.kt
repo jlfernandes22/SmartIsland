@@ -85,6 +85,7 @@ fun PositionsSection(
     var localOpacity by remember(settings.opacity) { mutableFloatStateOf(settings.opacity) }
     var localIdleWidth by remember(settings.idleWidth) { mutableFloatStateOf(settings.idleWidth) }
     var localIdleHeight by remember(settings.idleHeight) { mutableFloatStateOf(settings.idleHeight) }
+    var localIdleYOffset by remember(settings.idleYOffset) { mutableFloatStateOf(settings.idleYOffset) }
 
     // Dynamically calculate responsive notch coordinates for the current device screen
     val screenWidthDp = with(density) { windowInfo.containerSize.width.toDp().value }
@@ -308,6 +309,11 @@ fun PositionsSection(
                         scope.launch {
                             val detected = com.agupta07505.smartisland.util.CameraCutoutDetector.detectAsync(context)
                             repository.setIdleSize(detected.widthDp, detected.heightDp)
+                            // The detection now also centers the pill on the
+                            // hole vertically (detected.yOffsetDp is the WINDOW
+                            // y for that). Applying it keeps the pill glued to
+                            // the camera instead of hanging below it.
+                            repository.setIdleYOffset(detected.yOffsetDp)
                             if (detected.hasHardwareCutout) {
                                 repository.setIdleSizeAutoDetected(true)
                             }
@@ -350,6 +356,15 @@ fun PositionsSection(
                     onValueChange = { localIdleHeight = it },
                     onValueChangeFinished = {
                         scope.launch { repository.setIdleSize(localIdleWidth, localIdleHeight) }
+                    }
+                )
+                SliderSettingItem(
+                    label = stringResource(R.string.slider_idle_y_offset),
+                    value = localIdleYOffset,
+                    range = SmartIslandSettings.MIN_IDLE_Y_OFFSET..SmartIslandSettings.MAX_Y_OFFSET,
+                    onValueChange = { localIdleYOffset = it },
+                    onValueChangeFinished = {
+                        scope.launch { repository.setIdleYOffset(localIdleYOffset) }
                     }
                 )
             }

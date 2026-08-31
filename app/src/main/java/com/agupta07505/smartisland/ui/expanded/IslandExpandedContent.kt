@@ -118,7 +118,9 @@ fun IslandExpandedContent(
     // card opened tall and then shrank to the real ~60dp menu height after
     // the first measurement — the "content shifts up after the page settles"
     // symptom. Estimate == measurement ⇒ the height spring never retargets.
-    var infoPageHeight by remember {
+    // Re-seeds when the card width changes (the info page can now be shown at
+    // the content-sized menu width while notifications exist too).
+    var infoPageHeight by remember(expandedWidth) {
         mutableStateOf(
             com.agupta07505.smartisland.ui.expanded.idleInfoMenuHeightDp(
                 settings,

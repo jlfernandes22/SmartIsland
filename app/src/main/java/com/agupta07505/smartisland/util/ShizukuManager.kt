@@ -608,6 +608,11 @@ object ShizukuManager {
         TetheringShizukuService.ERR_UNAVAILABLE -> "Shizuku service error"
         TetheringShizukuService.ERR_TIMEOUT -> "no answer (timeout)"
         TetheringShizukuService.ERR_STATE_UNCHANGED -> "state did not change"
+        // Provisioning flow still running (approval dialog up): not a hard
+        // refusal — the late verifier flips this to success when the hotspot
+        // actually comes up.
+        TetheringShizukuService.ERR_PROVISIONING_PENDING ->
+            "approval pending — approve the dialog if one is shown"
         // TetheringManager.TETHER_ERROR_* (positive, stable since API 30).
         // Code 14 (TETHER_ERROR_PROVISIONING_FAILED) is the carrier-entitlement
         // refusal — the service now retries that case WITH the provisioning UI
@@ -639,11 +644,12 @@ object ShizukuManager {
     private var tetheringServiceConnection: ServiceConnection? = null
 
     /** Bump whenever [TetheringShizukuService] or its AIDL changes shape. */
-    // v5: startTethering retries with showProvisioningUi=true when the
-    // no-UI attempt is refused (TETHER_ERROR_PROVISIONING_FAILED) and polls
-    // the iface list before giving up — the server process must be restarted
-    // so the old v4 code stops answering.
-    private const val USER_SERVICE_VERSION = 5
+    // v6: idempotent toggle (authoritative already-up/already-down check),
+    // 20s provisioning latch + 15s iface poll, and a last-resort direct
+    // startSoftAp with the SAVED config when the entitlement flow explicitly
+    // refuses — the server process must be restarted so old v5 code stops
+    // answering.
+    private const val USER_SERVICE_VERSION = 6
     private const val USER_SERVICE_BIND_TIMEOUT_MS = 9000L
     private const val USER_SERVICE_BIND_RETRY_MS = 4000L
     private const val TETHERED_IFACES_TIMEOUT_MS = 2000L

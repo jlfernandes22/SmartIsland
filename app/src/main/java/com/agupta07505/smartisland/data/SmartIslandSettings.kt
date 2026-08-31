@@ -53,6 +53,11 @@ data class SmartIslandSettings(
     val useCutoutSizeWhenIdle: Boolean = false,
     val idleWidth: Float = 112f,
     val idleHeight: Float = 34f,
+    // Vertical position of the IDLE pill, independent from the wide island's
+    // yOffset (the precision-tuning slider): moving the wide island must never
+    // drag the idle punch-hole pill with it. Defaults to the old shared value
+    // so existing installs keep their current idle position.
+    val idleYOffset: Float = 12f,
     val idleSizeAutoDetected: Boolean = false,
     val hideWhenShadeOpen: Boolean = true,
     val swipeUpAction: String = "DISMISS",
@@ -83,6 +88,11 @@ data class SmartIslandSettings(
         const val MAX_OPACITY = 1f
         const val MIN_IDLE_WIDTH = 20f
         const val MIN_IDLE_HEIGHT = 24f
+        // The idle-Y slider is 0..MAX_Y_OFFSET, but the cutout auto-detect may
+        // produce a slightly negative value when the pill must CENTER on a
+        // camera hole that starts at the very top of the screen (the overlay
+        // window carries FLAG_LAYOUT_NO_LIMITS, so a negative y renders fine).
+        const val MIN_IDLE_Y_OFFSET = -20f
     }
 
     object GestureActions {

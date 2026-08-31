@@ -152,6 +152,14 @@ fun IslandOverlayView(
         durationMillis = 190,
         easing = FastOutSlowInEasing
     )
+    // POSITION springs (X offsets): critically damped — an overshooting X
+    // spring visibly flew past the collapsed spot and settled BACK left,
+    // which read as a small snap to the left at the end of every collapse
+    // that involved companion bubbles. Sizes keep their playful bounce.
+    val positionSpec = spring<androidx.compose.ui.unit.Dp>(
+        dampingRatio = 1f,
+        stiffness = 520f
+    )
 
     val safeIndex = selectedIndex.coerceIn(0, (notifications.size - 1).coerceAtLeast(0))
     val activeNotification = notifications.getOrNull(safeIndex)
@@ -170,8 +178,12 @@ fun IslandOverlayView(
     // ~232dp wide, not the 0.95-screen-width band the other pages use. The
     // width target, the height estimate and the width handed to the content
     // all derive from idleInfoMenuWidthDp so all three stay consistent.
-    val isIdleInfoExpand = notifications.isEmpty() &&
-        settings.idleTapMode == SmartIslandSettings.IdleTapModes.INFO
+    // With notifications active the menu lives at pager page 0; while that
+    // page is the one on screen the card sizes to the menu too — the old
+    // notifications.isEmpty() gate kept the menu at full width whenever any
+    // notification existed.
+    val isIdleInfoExpand = settings.idleTapMode == SmartIslandSettings.IdleTapModes.INFO &&
+        (notifications.isEmpty() || infoPageActive)
     val expandedCardWidth = if (isIdleInfoExpand) {
         idleInfoMenuWidthDp(settings)
     } else {
@@ -245,11 +257,18 @@ fun IslandOverlayView(
     // per-frame window/compensation animation is needed, which is what made
     // the collapsed island shake before).
     val collapsedMainOffset = settings.xOffset.dp
-    val expandedTopOffset = if (hasCompanion) {
+    // Expanded card top offset. The base clears the status bar (and the
+    // companion mini-pill when one exists); the wide-Y delta then applies the
+    // precision-tuning "vertical offset" WITHOUT moving the window: the
+    // window always sits at the idle pill's y (see SmartIslandOverlayService),
+    // so the wide island's Y is decoupled from the idle punch-hole pill's Y
+    // and changing one slider can never displace the other.
+    val wideYDelta = (settings.yOffset - settings.idleYOffset).dp
+    val expandedTopOffset = (if (hasCompanion) {
         statusBarHeight.dp.coerceAtLeast(circleSize + compactGap)
     } else {
         statusBarHeight.dp
-    }
+    }) + wideYDelta
     val isIdleHiding = settings.hideWhenIdle && notifications.isEmpty()
 
     var isAutoHidden by remember { mutableStateOf(false) }
@@ -286,7 +305,7 @@ fun IslandOverlayView(
     val radius by transition.animateDp(transitionSpec = { sizeSpec }, label = "islandRadius") {
         if (it) 34.dp else if (isHiding) 0.dp else settings.cornerRadius.dp
     }
-    val animatedXOffset by transition.animateDp(transitionSpec = { sizeSpec }, label = "islandXOffset") {
+    val animatedXOffset by transition.animateDp(transitionSpec = { positionSpec }, label = "islandXOffset") {
         if (it) 0.dp else collapsedMainOffset
     }
 
@@ -433,7 +452,7 @@ fun IslandOverlayView(
     val expandedSecondaryLeft = 0.dp
     val secondaryOffset by animateDpAsState(
         targetValue = if (!expanded) collapsedSecondaryOffset else expandedSecondaryLeft,
-        animationSpec = spring(dampingRatio = 0.75f, stiffness = 520f),
+        animationSpec = spring(dampingRatio = 1f, stiffness = 520f),
         label = "secondaryOffset"
     )
 
@@ -443,7 +462,7 @@ fun IslandOverlayView(
         circleSize + compactGap + circleSize / 2f - screenCenter
     val tertiaryOffset by animateDpAsState(
         targetValue = collapsedTertiaryOffset,
-        animationSpec = spring(dampingRatio = 0.75f, stiffness = 520f),
+        animationSpec = spring(dampingRatio = 1f, stiffness = 520f),
         label = "tertiaryOffset"
     )
 
@@ -527,6 +546,14 @@ fun IslandOverlayView(
                     if (isInputActive) return@pointerInput
                     awaitEachGesture {
                         val down = awaitFirstDown(requireUnconsumed = false)
+                        // A child of the card (the pager page's clickable, any
+                        // button) consumes the DOWN to own the tap. That must
+                        // NOT eat this handler's swipes: the pager claims only
+                        // horizontal movement and the seek bar only a deliberate
+                        // hold-scrub, so vertical drags still arrive here
+                        // unconsumed. The flag only silences the TAP branches so
+                        // a tap is never fired twice (child click + pill tap).
+                        val downConsumedByChild = down.isConsumed
                         userInteractionTimestamp = System.currentTimeMillis()
                         val pressTimeMs = System.currentTimeMillis()
                         var isHoldRegistered = false
@@ -548,10 +575,13 @@ fun IslandOverlayView(
                         }
 
                         val pointerId = down.id
+                        var isFirstEvent = true
 
                         while (true) {
                             val event = awaitPointerEvent()
                             val change = event.changes.firstOrNull { it.id == pointerId } ?: break
+                            val isDownEvent = isFirstEvent
+                            isFirstEvent = false
 
                             if (change.changedToUp()) {
                                 change.consume()
@@ -595,7 +625,7 @@ fun IslandOverlayView(
                                             else -> Unit
                                         }
                                     } else if (!isDragging || abs(dragOffset) < 10f) {
-                                        if (!isHoldRegistered) {
+                                        if (!downConsumedByChild && !isHoldRegistered) {
                                             val currentNotification = currentNotifications.getOrNull(currentSafeIndex)
                                             if (currentNotification != null && !infoPageActive) {
                                                 currentOnOpenNotification(currentNotification)
@@ -610,14 +640,20 @@ fun IslandOverlayView(
                                     }
                                 } else {
                                     if (!isDragging || abs(dragOffset) < 10f) {
-                                        when (currentSettings.tapAction) {
-                                            SmartIslandSettings.GestureActions.TOGGLE -> currentOnToggle()
-                                            else -> Unit
+                                        if (!downConsumedByChild) {
+                                            when (currentSettings.tapAction) {
+                                                SmartIslandSettings.GestureActions.TOGGLE -> currentOnToggle()
+                                                else -> Unit
+                                            }
                                         }
                                     }
                                 }
                                 break
-                            } else if (change.isConsumed) {
+                            } else if (!isDownEvent && change.isConsumed) {
+                                // A child claimed the pointer DURING the gesture
+                                // (pager horizontal drag, seek-bar scrub): it owns
+                                // this gesture now. The DOWN event is exempt — see
+                                // downConsumedByChild above.
                                 holdJob.cancel()
                                 break
                             } else {
