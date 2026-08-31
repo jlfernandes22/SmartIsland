@@ -91,7 +91,11 @@ android {
             "IconXmlAndPng",
             "BatteryLife",
             "ConfigurationScreenWidthHeight",
-            "ModifierParameter"
+            "ModifierParameter",
+            // English-only fork: locale dirs are best-effort community files and
+            // intentionally trail the default values/ strings — missing keys fall
+            // back to the default resource at runtime, so this is policy, not a bug.
+            "MissingTranslation"
         )
     }
 

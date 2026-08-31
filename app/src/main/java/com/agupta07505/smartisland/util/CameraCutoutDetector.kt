@@ -17,6 +17,7 @@ import android.view.DisplayCutout
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
+import androidx.annotation.RequiresApi
 import com.agupta07505.smartisland.data.SmartIslandSettings
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
@@ -138,6 +139,10 @@ object CameraCutoutDetector {
         return cutoutToInfo(cutout, context)
     }
 
+    // DisplayCutout itself is API 28; both call sites already gate on P+ (R+ for
+    // detectFromDisplay, P for the window-insets probe), so the requirement is
+    // declared here instead of duplicating version checks inside the mapping.
+    @RequiresApi(Build.VERSION_CODES.P)
     private fun cutoutToInfo(cutout: DisplayCutout?, context: Context): DetectedCutoutInfo? {
         val boundingRects = cutout?.boundingRects
         if (boundingRects.isNullOrEmpty()) return null

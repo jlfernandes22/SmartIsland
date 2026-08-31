@@ -7,6 +7,7 @@
 
 package com.agupta07505.smartisland.shizuku
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.util.Log
 import java.util.concurrent.CountDownLatch
@@ -103,6 +104,12 @@ class TetheringShizukuService(private val context: Context) : ITetheringUserServ
      * read (the same switch the app polls): already-in-target-state counts as
      * success so the caller's own verification never races a no-op.
      */
+    // Lint wants a runtime BLUETOOTH_PRIVILEGED/CONNECT check, but this code
+    // never runs in the app: the user service executes inside Shizuku's
+    // shell-uid process, which the platform grants the privileged Bluetooth
+    // permissions. A SecurityException would additionally be caught by the
+    // runCatching below and reported as a plain false to the caller.
+    @SuppressLint("MissingPermission")
     override fun setBluetoothEnabled(enable: Boolean): Boolean {
         return runCatching {
             val adapter = android.bluetooth.BluetoothAdapter.getDefaultAdapter()

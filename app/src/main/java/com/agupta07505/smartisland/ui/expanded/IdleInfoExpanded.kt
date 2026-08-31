@@ -166,7 +166,13 @@ fun IdleInfoExpanded(
                     tint = if (state.batteryCharging) AccentOn else Muted,
                     highlight = state.batteryCharging,
                     highlightColor = AccentOn,
-                    badgeText = state.batteryText.substringBefore(" ").ifEmpty { "--" }
+                    // While charging the bolt prefix replaces the plain percent —
+                    // one glance says "plugged in", the accent tint says "green".
+                    badgeText = if (state.batteryCharging) {
+                        "⚡" + state.batteryText.substringBefore(" ")
+                    } else {
+                        state.batteryText.substringBefore(" ").ifEmpty { "--" }
+                    }
                 ) {
                     onItemClick(IDLE_ITEM_BATTERY)
                 }
@@ -371,12 +377,23 @@ private fun readDeviceState(context: Context): IdleDeviceState {
     }.getOrDefault(false)
     if (bluetoothOn) {
         bluetoothText = "On"
-        // Best-effort device count: bondedDevices needs BLUETOOTH_CONNECT.
-        runCatching {
-            val adapter = BluetoothAdapter.getDefaultAdapter()
-            val bonded = adapter?.bondedDevices
-            if (!bonded.isNullOrEmpty()) {
-                bluetoothText = "On • ${bonded.size} device${if (bonded.size == 1) "" else "s"}"
+        // Best-effort device count: bondedDevices needs BLUETOOTH_CONNECT on
+        // S+ (older releases hold the install-time BLUETOOTH permission).
+        // The count is skipped when the grant is missing — the tile falls
+        // back to a plain "On" readout instead of burning a SecurityException.
+        val canReadBondedDevices = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            context.checkSelfPermission(android.Manifest.permission.BLUETOOTH_CONNECT) ==
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+        } else {
+            true
+        }
+        if (canReadBondedDevices) {
+            runCatching {
+                val adapter = BluetoothAdapter.getDefaultAdapter()
+                val bonded = adapter?.bondedDevices
+                if (!bonded.isNullOrEmpty()) {
+                    bluetoothText = "On • ${bonded.size} device${if (bonded.size == 1) "" else "s"}"
+                }
             }
         }
     }

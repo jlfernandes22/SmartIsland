@@ -82,6 +82,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun requestBluetoothPermissionIfNeeded() {
+        // BLUETOOTH_CONNECT exists only on S+; on older releases the legacy
+        // install-time BLUETOOTH permission already covers adapter reads, so
+        // asking would be both a no-op and a lint InlinedApi violation.
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.S) return
         val granted = checkSelfPermission(android.Manifest.permission.BLUETOOTH_CONNECT) ==
             PackageManager.PERMISSION_GRANTED
         if (!granted) {
