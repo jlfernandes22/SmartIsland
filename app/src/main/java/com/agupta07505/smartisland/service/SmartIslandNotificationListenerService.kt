@@ -58,6 +58,18 @@ import javax.inject.Inject
 class SmartIslandNotificationListenerService : NotificationListenerService() {
     // Keys we have canceled ourselves to make island-only. Keeps island copy alive.
     private val suppressedKeys = ConcurrentHashMap<String, Long>()
+    // Keys the user EXPLICITLY discarded from the island (hold + swipe-up
+    // dismiss, dismiss-all, action-button dismiss). Many apps keep UPDATING
+    // their notifications after they are relevant to the island (media
+    // progress ticks, countdown timers, download progress); every such
+    // update re-posted the dismissed notification to the island — the user
+    // saw it "come back because it wasn't discarded". While a key is
+    // tombstoned, re-posts of it are swallowed (and their system copy
+    // cancelled when shade-hiding is active). The TTL is rolling: each
+    // swallowed update re-arms the tombstone, so an actively-updating
+    // notification stays dismissed; a genuinely NEW post after the user has
+    // moved on (TTL expired with no further updates) shows normally.
+    private val userDismissedKeys = ConcurrentHashMap<String, Long>()
     @Volatile private var currentSettings = SmartIslandSettings.Default
     private val coroutineExceptionHandler = CoroutineExceptionHandler { _, error ->
         android.util.Log.e(TAG, "Unhandled notification-listener coroutine failure", error)
@@ -117,6 +129,7 @@ class SmartIslandNotificationListenerService : NotificationListenerService() {
         pendingSuppressionJobs.values.forEach { it.cancel() }
         pendingSuppressionJobs.clear()
         suppressedKeys.clear()
+        userDismissedKeys.clear()
         iconCache.evictAll()
         serviceScope.cancel()
         super.onDestroy()
@@ -361,6 +374,21 @@ class SmartIslandNotificationListenerService : NotificationListenerService() {
         settings: SmartIslandSettings
     ) {
         if (sbn.packageName == packageName) return
+        // USER-DISMISS TOMBSTONE: this key was explicitly discarded by the
+        // user. Swallow the re-post instead of resurrecting it: keep the
+        // tombstone armed (rolling window) and, when shade-hiding is on,
+        // cancel the freshly re-posted system copy too. Without this, every
+        // app-side update of a dismissed notification re-added it to the
+        // island — "sometimes the notification still comes back because it
+        // wasn't discarded".
+        if (isUserDismissed(sbn.key)) {
+            android.util.Log.d(TAG, "User-dismissed key re-posted; swallowed: ${sbn.key}")
+            markUserDismissed(sbn.key)
+            if (settings.enabled && settings.hideFromNotificationShade) {
+                suppressSystemNotification(sbn.key)
+            }
+            return
+        }
         val notification = sbn.notification
         if (shouldSuppressFromIsland(sbn)) return
 
@@ -665,10 +693,38 @@ class SmartIslandNotificationListenerService : NotificationListenerService() {
     }
 
     private fun forceCancelNotification(key: String) {
-        // This is an explicit user action, so the island copy must disappear as well.
+        // This is an explicit user action, so the island copy must disappear as well
+        // and the key must stay dismissed (see userDismissedKeys).
+        markUserDismissed(key)
         clearSuppressed(key)
         runCatchingLogged(TAG, "forceCancel failed") { cancelNotification(key) }
         notificationRepository.removeNotification(key)
+    }
+
+    private fun markUserDismissed(key: String) {
+        userDismissedKeys[key] = SystemClock.elapsedRealtime()
+        cleanupUserDismissedKeys()
+    }
+
+    private fun isUserDismissed(key: String): Boolean {
+        cleanupUserDismissedKeys()
+        return userDismissedKeys.containsKey(key)
+    }
+
+    private fun cleanupUserDismissedKeys(now: Long = SystemClock.elapsedRealtime()) {
+        val cutoff = now - USER_DISMISS_TOMBSTONE_TTL_MS
+        userDismissedKeys.entries.forEach { entry ->
+            if (entry.value < cutoff) {
+                userDismissedKeys.remove(entry.key, entry.value)
+            }
+        }
+        val overflow = userDismissedKeys.size - MAX_USER_DISMISSED_KEYS
+        if (overflow > 0) {
+            userDismissedKeys.entries
+                .sortedBy { it.value }
+                .take(overflow)
+                .forEach { userDismissedKeys.remove(it.key, it.value) }
+        }
     }
 
     private fun playNotificationSound(sbn: StatusBarNotification) {
@@ -926,5 +982,11 @@ class SmartIslandNotificationListenerService : NotificationListenerService() {
         private const val MAX_SUPPRESSED_KEYS = 100
         private const val SUPPRESSED_KEY_TTL_MS = 10 * 60 * 1000L
         private const val INITIAL_SUPPRESSION_WINDOW_MS = 1500L
+        // How long a user-dismissed key stays tombstoned against re-posts.
+        // Long enough to outlive any sane update cadence (media ticks run at
+        // 1-17s), short enough that a genuinely new notification from the
+        // same app key shows up again.
+        private const val USER_DISMISS_TOMBSTONE_TTL_MS = 30_000L
+        private const val MAX_USER_DISMISSED_KEYS = 100
     }
 }

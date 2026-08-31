@@ -180,6 +180,7 @@
     <string name="slider_idle_width">Idle Pill Width</string>
     <string name="slider_idle_height">Idle Pill Height</string>
     <string name="slider_idle_y_offset">Idle Pill Vertical Offset</string>
+    <string name="slider_idle_x_offset">Idle Pill Horizontal Offset</string>
 
     <!-- Customizations / Studio -->
     <string name="opacity_card_title">Island Opacity &amp; Transparency</string>
@@ -275,7 +276,6 @@
     <string name="idle_info_time_title">Show Time &amp; Date</string>
     <string name="idle_info_battery_title">Show Battery Level</string>
     <string name="idle_info_bluetooth_title">Show Bluetooth Status</string>
-    <string name="idle_info_hotspot_title">Show Hotspot Toggle</string>
     <string name="statusbar_icons_title">Hide status bar icons</string>
     <string name="statusbar_icons_desc">Hides the clock, system icons and notification icons so the island can take the status bar\'s place. Needs Shizuku. Icons come back after a reboot and are hidden again automatically once Shizuku is up.</string>
 

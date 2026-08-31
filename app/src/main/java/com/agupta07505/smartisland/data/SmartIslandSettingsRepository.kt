@@ -83,6 +83,7 @@ class SmartIslandSettingsRepository(private val context: Context) {
         val IdleWidth = floatPreferencesKey("idle_width")
         val IdleHeight = floatPreferencesKey("idle_height")
         val IdleYOffset = floatPreferencesKey("idle_y_offset")
+        val IdleXOffset = floatPreferencesKey("idle_x_offset")
         val IdleSizeAutoDetected = booleanPreferencesKey("idle_size_auto_detected")
         val HideWhenShadeOpen = booleanPreferencesKey("hide_when_shade_open")
         val SwipeUpAction = stringPreferencesKey("swipe_up_action")
@@ -93,7 +94,6 @@ class SmartIslandSettingsRepository(private val context: Context) {
         val IdleInfoShowTime = booleanPreferencesKey("idle_info_show_time")
         val IdleInfoShowBattery = booleanPreferencesKey("idle_info_show_battery")
         val IdleInfoShowBluetooth = booleanPreferencesKey("idle_info_show_bluetooth")
-        val IdleInfoShowHotspot = booleanPreferencesKey("idle_info_show_hotspot")
         val StatusBarIconsHidden = booleanPreferencesKey("status_bar_icons_hidden")
     }
 
@@ -225,6 +225,12 @@ class SmartIslandSettingsRepository(private val context: Context) {
                     SmartIslandSettings.MIN_IDLE_Y_OFFSET,
                     SmartIslandSettings.MAX_Y_OFFSET
                 ),
+                idleXOffset = validDimension(
+                    prefs[Keys.IdleXOffset],
+                    defaults.idleXOffset,
+                    SmartIslandSettings.MIN_X_OFFSET,
+                    SmartIslandSettings.MAX_X_OFFSET
+                ),
                 idleSizeAutoDetected = prefs[Keys.IdleSizeAutoDetected] ?: defaults.idleSizeAutoDetected,
                 hideWhenShadeOpen = prefs[Keys.HideWhenShadeOpen] ?: defaults.hideWhenShadeOpen,
                 swipeUpAction = prefs[Keys.SwipeUpAction]
@@ -245,7 +251,6 @@ class SmartIslandSettingsRepository(private val context: Context) {
                 idleInfoShowTime = prefs[Keys.IdleInfoShowTime] ?: defaults.idleInfoShowTime,
                 idleInfoShowBattery = prefs[Keys.IdleInfoShowBattery] ?: defaults.idleInfoShowBattery,
                 idleInfoShowBluetooth = prefs[Keys.IdleInfoShowBluetooth] ?: defaults.idleInfoShowBluetooth,
-                idleInfoShowHotspot = prefs[Keys.IdleInfoShowHotspot] ?: defaults.idleInfoShowHotspot,
                 statusBarIconsHidden = prefs[Keys.StatusBarIconsHidden] ?: defaults.statusBarIconsHidden
             )
         }
@@ -467,6 +472,16 @@ class SmartIslandSettingsRepository(private val context: Context) {
             SmartIslandSettings.MAX_Y_OFFSET
         )
     }
+
+    /** Horizontal position of the idle pill, independent from the wide island's xOffset. */
+    suspend fun setIdleXOffset(value: Float) = editSafely {
+        it[Keys.IdleXOffset] = validDimension(
+            value,
+            SmartIslandSettings.Default.idleXOffset,
+            SmartIslandSettings.MIN_X_OFFSET,
+            SmartIslandSettings.MAX_X_OFFSET
+        )
+    }
     suspend fun setIdleSizeAutoDetected(value: Boolean) = editSafely {
         it[Keys.IdleSizeAutoDetected] = value
     }
@@ -501,9 +516,6 @@ class SmartIslandSettingsRepository(private val context: Context) {
     }
     suspend fun setIdleInfoShowBluetooth(value: Boolean) = editSafely {
         it[Keys.IdleInfoShowBluetooth] = value
-    }
-    suspend fun setIdleInfoShowHotspot(value: Boolean) = editSafely {
-        it[Keys.IdleInfoShowHotspot] = value
     }
     suspend fun setStatusBarIconsHidden(value: Boolean) = editSafely {
         it[Keys.StatusBarIconsHidden] = value

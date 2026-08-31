@@ -53,11 +53,16 @@ data class SmartIslandSettings(
     val useCutoutSizeWhenIdle: Boolean = false,
     val idleWidth: Float = 112f,
     val idleHeight: Float = 34f,
-    // Vertical position of the IDLE pill, independent from the wide island's
-    // yOffset (the precision-tuning slider): moving the wide island must never
-    // drag the idle punch-hole pill with it. Defaults to the old shared value
-    // so existing installs keep their current idle position.
+    // Position of the IDLE pill, independent from the wide island's offsets
+    // (the precision-tuning sliders): moving the wide island must never drag
+    // the idle punch-hole pill with it. The X twin of idleYOffset: without it
+    // every dismiss-to-idle morph slid the tiny pill sideways from the
+    // expanded card's center to the wide island's xOffset, which read as
+    // "the idle pill comes from the left and snaps into place". Y defaults
+    // to the old shared value so existing installs keep their position; X
+    // defaults to the hole-centered 0.
     val idleYOffset: Float = 12f,
+    val idleXOffset: Float = 0f,
     val idleSizeAutoDetected: Boolean = false,
     val hideWhenShadeOpen: Boolean = true,
     val swipeUpAction: String = "DISMISS",
@@ -68,7 +73,6 @@ data class SmartIslandSettings(
     val idleInfoShowTime: Boolean = true,
     val idleInfoShowBattery: Boolean = true,
     val idleInfoShowBluetooth: Boolean = true,
-    val idleInfoShowHotspot: Boolean = true,
     val statusBarIconsHidden: Boolean = false
 ) {
     companion object {

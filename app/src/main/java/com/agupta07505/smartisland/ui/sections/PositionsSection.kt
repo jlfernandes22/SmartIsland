@@ -86,6 +86,7 @@ fun PositionsSection(
     var localIdleWidth by remember(settings.idleWidth) { mutableFloatStateOf(settings.idleWidth) }
     var localIdleHeight by remember(settings.idleHeight) { mutableFloatStateOf(settings.idleHeight) }
     var localIdleYOffset by remember(settings.idleYOffset) { mutableFloatStateOf(settings.idleYOffset) }
+    var localIdleXOffset by remember(settings.idleXOffset) { mutableFloatStateOf(settings.idleXOffset) }
 
     // Dynamically calculate responsive notch coordinates for the current device screen
     val screenWidthDp = with(density) { windowInfo.containerSize.width.toDp().value }
@@ -309,11 +310,15 @@ fun PositionsSection(
                         scope.launch {
                             val detected = com.agupta07505.smartisland.util.CameraCutoutDetector.detectAsync(context)
                             repository.setIdleSize(detected.widthDp, detected.heightDp)
-                            // The detection now also centers the pill on the
-                            // hole vertically (detected.yOffsetDp is the WINDOW
-                            // y for that). Applying it keeps the pill glued to
-                            // the camera instead of hanging below it.
+                            // The detection also anchors the pill ON the hole:
+                            // yOffsetDp centers it vertically (window y) and
+                            // xOffsetDp centers it horizontally (the idle
+                            // pill's own x — the wide island's xOffset must
+                            // not move it). Applying both keeps the pill
+                            // glued to the camera instead of hanging below
+                            // or beside it.
                             repository.setIdleYOffset(detected.yOffsetDp)
+                            repository.setIdleXOffset(detected.xOffsetDp)
                             if (detected.hasHardwareCutout) {
                                 repository.setIdleSizeAutoDetected(true)
                             }
@@ -365,6 +370,15 @@ fun PositionsSection(
                     onValueChange = { localIdleYOffset = it },
                     onValueChangeFinished = {
                         scope.launch { repository.setIdleYOffset(localIdleYOffset) }
+                    }
+                )
+                SliderSettingItem(
+                    label = stringResource(R.string.slider_idle_x_offset),
+                    value = localIdleXOffset,
+                    range = SmartIslandSettings.MIN_X_OFFSET..SmartIslandSettings.MAX_X_OFFSET,
+                    onValueChange = { localIdleXOffset = it },
+                    onValueChangeFinished = {
+                        scope.launch { repository.setIdleXOffset(localIdleXOffset) }
                     }
                 )
             }

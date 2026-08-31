@@ -245,12 +245,6 @@ fun GesturesSection(
                         checked = settings.idleInfoShowBluetooth,
                         onCheckedChange = { scope.launch { repository.setIdleInfoShowBluetooth(it) } }
                     )
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f))
-                    IdleInfoToggleRow(
-                        label = stringResource(R.string.idle_info_hotspot_title),
-                        checked = settings.idleInfoShowHotspot,
-                        onCheckedChange = { scope.launch { repository.setIdleInfoShowHotspot(it) } }
-                    )
                 }
             }
         }

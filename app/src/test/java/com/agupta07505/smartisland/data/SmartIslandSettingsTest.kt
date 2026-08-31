@@ -50,7 +50,6 @@ class SmartIslandSettingsTest {
         assertEquals(true, settings.idleInfoShowTime)
         assertEquals(true, settings.idleInfoShowBattery)
         assertEquals(true, settings.idleInfoShowBluetooth)
-        assertEquals(true, settings.idleInfoShowHotspot)
     }
 
     @Test

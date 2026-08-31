@@ -47,8 +47,6 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.agupta07505.smartisland.data.SmartIslandSettings
-import com.agupta07505.smartisland.util.HotspotUtil
-import com.agupta07505.smartisland.util.ShizukuManager
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -61,8 +59,7 @@ private data class IdleDeviceState(
     val batteryText: String,
     val batteryCharging: Boolean,
     val bluetoothText: String,
-    val bluetoothOn: Boolean,
-    val hotspotText: String
+    val bluetoothOn: Boolean
 )
 
 // Height clamp shared with the measured-height reporting in
@@ -87,8 +84,7 @@ fun idleInfoMenuHeightDp(settings: SmartIslandSettings, availableWidthDp: Float)
     val tileEnabled = listOf(
         settings.idleInfoShowTime,
         settings.idleInfoShowBattery,
-        settings.idleInfoShowBluetooth,
-        settings.idleInfoShowHotspot
+        settings.idleInfoShowBluetooth
     )
     val tileCount = tileEnabled.count { it }
     if (tileCount == 0) {
@@ -120,8 +116,7 @@ fun idleInfoMenuWidthDp(settings: SmartIslandSettings): Dp {
     val tileCount = listOf(
         settings.idleInfoShowTime,
         settings.idleInfoShowBattery,
-        settings.idleInfoShowBluetooth,
-        settings.idleInfoShowHotspot
+        settings.idleInfoShowBluetooth
     ).count { it }
     if (tileCount == 0) {
         // "All info items are disabled" one-line fallback text.
@@ -136,7 +131,6 @@ fun idleInfoMenuWidthDp(settings: SmartIslandSettings): Dp {
 private val Muted = Color(0xFF8E99A4)
 private val AccentOn = Color(0xFF10B981)
 private val AccentBluetooth = Color(0xFF2563EB)
-private val AccentHotspot = Color(0xFFF59E0B)
 private val AccentTime = Color(0xFF38BDF8)
 
 // Tile geometry: everything lives on a 44dp grid so four enabled items still
@@ -153,23 +147,14 @@ fun IdleInfoExpanded(
     feedback: String? = null
 ) {
     val context = LocalContext.current
-    // Battery/BT/hotspot/tethering reads are binder + reflection + interface
-    // probes; run them on IO so the 1s menu refresh never janks the overlay's
-    // main thread. The hotspot read goes through the Shizuku user service
-    // FIRST (the platform's authoritative tethered-iface list — the in-app
-    // readers can be reflection-blocked, which used to pin the tile to
-    // "Tap to toggle" forever); HotspotUtil is the fallback.
+    // Battery/Bluetooth reads are binder + reflection probes; run them on IO
+    // so the 1s menu refresh never janks the overlay's main thread.
     val state by produceState(
-        initialValue = IdleDeviceState("", "", false, "", false, "")
+        initialValue = IdleDeviceState("", "", false, "", false)
     ) {
         while (true) {
             value = withContext(Dispatchers.IO) {
-                val serviceIfaces = if (ShizukuManager.isBinderAvailable()) {
-                    ShizukuManager.tetheredIfacesViaUserService()
-                } else {
-                    null
-                }
-                readDeviceState(context, serviceIfaces)
+                readDeviceState(context)
             }
             delay(1000L)
         }
@@ -220,22 +205,11 @@ fun IdleInfoExpanded(
                     onItemClick(IDLE_ITEM_BLUETOOTH)
                 }
             }
-            if (settings.idleInfoShowHotspot) {
-                ToggleTile(
-                    icon = Icons.Rounded.WifiTethering,
-                    label = "Hotspot",
-                    on = state.hotspotText == "On",
-                    accent = AccentHotspot
-                ) {
-                    onItemClick(IDLE_ITEM_HOTSPOT)
-                }
-            }
         }
 
         if (!settings.idleInfoShowTime &&
             !settings.idleInfoShowBattery &&
-            !settings.idleInfoShowBluetooth &&
-            !settings.idleInfoShowHotspot
+            !settings.idleInfoShowBluetooth
         ) {
             Text(
                 text = "All info items are disabled",
@@ -266,7 +240,6 @@ fun IdleInfoExpanded(
 const val IDLE_ITEM_TIME = "time"
 const val IDLE_ITEM_BATTERY = "battery"
 const val IDLE_ITEM_BLUETOOTH = "bluetooth"
-const val IDLE_ITEM_HOTSPOT = "hotspot"
 
 /**
  * Clock tile: the HH:mm readout IS the content — the only tile that is pure
@@ -373,7 +346,7 @@ private fun ToggleTile(
     }
 }
 
-private fun readDeviceState(context: Context, serviceIfaces: String?): IdleDeviceState {
+private fun readDeviceState(context: Context): IdleDeviceState {
     val now = System.currentTimeMillis()
     val timeText = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(now))
 
@@ -435,33 +408,11 @@ private fun readDeviceState(context: Context, serviceIfaces: String?): IdleDevic
         }
     }
 
-    var hotspotText = "Off"
-    runCatching {
-        // Layered reader, authoritative first: the shell-uid user service's
-        // TetheringManager answer ("" = definitively nothing tethering) →
-        // in-app TetheringManager/WifiManager reflection → unknown.
-        val active = if (serviceIfaces != null) {
-            val set = serviceIfaces.split("|")
-                .filter { it.isNotBlank() }
-                .map { it.lowercase() }
-                .toSet()
-            HotspotUtil.ifacesMatchKind(set, "wifi")
-        } else {
-            HotspotUtil.isWifiTetheringActive(context)
-        }
-        when (active) {
-            true -> hotspotText = "On"
-            null -> hotspotText = "Tap to toggle"
-            false -> hotspotText = "Off"
-        }
-    }
-
     return IdleDeviceState(
         timeText = timeText,
         batteryText = batteryText,
         batteryCharging = batteryCharging,
         bluetoothText = bluetoothText,
-        bluetoothOn = bluetoothOn,
-        hotspotText = hotspotText
+        bluetoothOn = bluetoothOn
     )
 }

@@ -44,7 +44,6 @@ import com.agupta07505.smartisland.model.IslandNotification
 import com.agupta07505.smartisland.ui.IslandViewModel
 import com.agupta07505.smartisland.ui.OverlayIsland
 import com.agupta07505.smartisland.ui.expanded.sendIntentWithOptions
-import com.agupta07505.smartisland.util.HotspotUtil
 import com.agupta07505.smartisland.util.ShizukuManager
 import com.agupta07505.smartisland.util.runCatchingLogged
 import com.agupta07505.smartisland.util.runSuspendCatchingLogged
@@ -638,6 +637,9 @@ class SmartIslandOverlayService : AccessibilityService() {
                         val isIdlePill = notificationsCount == 0 && settingsVal.useCutoutSizeWhenIdle
                         val pillWidthDp = if (isIdlePill) settingsVal.idleWidth else settingsVal.width
                         val pillHeightDp = if (isIdlePill) settingsVal.idleHeight else settingsVal.height
+                        // The idle pill's X is its own setting (idleXOffset) —
+                        // the wide island's xOffset must not move it.
+                        val pillXOffsetDp = if (isIdlePill) settingsVal.idleXOffset else settingsVal.xOffset
 
                         val mainWidthPx = pillWidthDp * density
                         // Same group width as collapsedParams(): with 3+
@@ -655,7 +657,7 @@ class SmartIslandOverlayService : AccessibilityService() {
                         val pillHeightPx = (pillHeightDp + 16f) * density
 
                         val desiredMainLeftPx = screenWidth / 2f +
-                            settingsVal.xOffset * density - mainWidthPx / 2f
+                            pillXOffsetDp * density - mainWidthPx / 2f
                         val maxMainLeftPx = (screenWidth - groupWidthPx - edgePaddingPx)
                             .coerceAtLeast(edgePaddingPx)
                         val mainLeftPx = desiredMainLeftPx.coerceIn(edgePaddingPx, maxMainLeftPx)
@@ -953,9 +955,10 @@ class SmartIslandOverlayService : AccessibilityService() {
         notificationCount: Int,
         density: Float
     ): Int {
-        // Idle pill awareness: mirrors IslandOverlayView's effectiveWidth so
-        // the narrow window never clips a cutout-sized idle pill (which can
-        // be wider or narrower than the wide island).
+        // Idle pill awareness: mirrors IslandOverlayView's effectiveWidth and
+        // collapsedMainOffset so the narrow window never clips a cutout-sized
+        // idle pill (which can be wider or narrower than the wide island) and
+        // stays centered on the IDLE pill's own x (idleXOffset).
         val isIdlePill = notificationCount == 0 && settings.useCutoutSizeWhenIdle
         val mainWidthDp = if (isIdlePill) settings.idleWidth else settings.width
         val mainWidthPx = mainWidthDp * density
@@ -966,7 +969,7 @@ class SmartIslandOverlayService : AccessibilityService() {
             notificationCount >= 2 -> compactGapPx + circleSizePx
             else -> 0f
         }
-        val xOffsetPx = settings.xOffset * density
+        val xOffsetPx = (if (isIdlePill) settings.idleXOffset else settings.xOffset) * density
         val sidePaddingPx = 16f * density
         val leftExtentPx = mainWidthPx / 2f - xOffsetPx
         val rightExtentPx = mainWidthPx / 2f + companionExtraPx + xOffsetPx
@@ -1242,182 +1245,6 @@ class SmartIslandOverlayService : AccessibilityService() {
     }
 
     /**
-     * Idle-menu Wi-Fi hotspot toggle, same spirit as the Bluetooth row.
-     *
-     * Dispatch: TetheringManager through the Shizuku user service (the shell
-     * uid holds TETHER_PRIVILEGED) — the exact path the Settings app uses, so
-     * the hotspot starts with the user's SAVED SSID/password config. The
-     * platform answers authoritatively: startTethering reports NO_ERROR only
-     * once the soft-AP reached WIFI_AP_STATE_ENABLED, and stopTethering is
-     * confirmed inside the user service by polling the tethered-iface list.
-     * The result code is therefore the verification — no secondary app-side
-     * re-check is run (the previous 4s re-verify raced the interface listing
-     * and disbelieved successful toggles, which is what used to send this
-     * row into the Quick Settings fallback; that fallback no longer exists:
-     * the user must NEVER see the QS panel from a hotspot toggle).
-     *
-     * The island stays visible and the menu stays open on every path; the
-     * result (including the exact failure stage) is shown as in-menu
-     * feedback because this device suppresses Toasts.
-     */
-    private fun toggleTetheringViaShizuku(label: String) {
-        // The proactive permission flow on the toggle rows: when a runtime
-        // grant the state readers rely on is missing (and was never rejected),
-        // MainActivity opens ON THIS TAP and asks for it while the toggle
-        // itself proceeds in the background (the dispatch runs with
-        // shell-level privileges and needs no app permission — the grants
-        // unblock the in-app state reads).
-        maybeRequestTogglePermissions()
-        hotspotLateVerifyJob?.cancel()
-        serviceScope.launch {
-            runSuspendCatchingLogged(TAG, "$label toggle failed") {
-                val before = readTetheringStateLive()
-                val target = before != true
-                if (::viewModel.isInitialized) {
-                    viewModel.postMenuFeedback(
-                        if (before == true) "Turning $label off…" else "Turning $label on…"
-                    )
-                }
-                val dispatched = if (ShizukuManager.isBinderAvailable()) {
-                    ShizukuManager.toggleTethering(kind = "wifi", enable = target)
-                } else {
-                    Result.failure(
-                        IllegalStateException("Shizuku offline")
-                    )
-                }
-                if (::viewModel.isInitialized) {
-                    if (dispatched.isSuccess) {
-                        viewModel.postMenuFeedback(if (target) "$label on" else "$label off")
-                        // The info menu stays open behind the toggle; restart
-                        // the auto-collapse window so the menu does not linger.
-                        viewModel.resetAutoCollapseTimer()
-                    } else {
-                        val reason = dispatched.exceptionOrNull()?.message
-                        viewModel.postMenuFeedback(
-                            if (reason.isNullOrBlank()) "Couldn't toggle $label"
-                            else "Couldn't toggle $label — $reason"
-                        )
-                        // LATE-APPROVAL VERIFICATION: a carrier approval that
-                        // lands after the dispatcher gave up (dialog read
-                        // slowly, provisioning app cold start) still turns the
-                        // hotspot ON — the previous code left the error line up
-                        // forever even though the hotspot came on, which read
-                        // as "carrier approval required even after granting".
-                        // Poll the authoritative iface list for a while and
-                        // flip the feedback to success the moment it appears.
-                        if (target) {
-                            hotspotLateVerifyJob = serviceScope.launch {
-                                runSuspendCatchingLogged(TAG, "$label late verify failed") {
-                                    val deadline = System.currentTimeMillis() +
-                                        HOTSPOT_LATE_VERIFY_MS
-                                    while (System.currentTimeMillis() < deadline) {
-                                        kotlinx.coroutines.delay(2000L)
-                                        if (readTetheringStateLive() == true) {
-                                            if (::viewModel.isInitialized) {
-                                                viewModel.postMenuFeedback("$label on")
-                                                viewModel.resetAutoCollapseTimer()
-                                            }
-                                            return@runSuspendCatchingLogged
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                android.util.Log.d(
-                    TAG,
-                    "Tethering toggle wifi: dispatched=${dispatched.isSuccess} " +
-                        "(reason=${dispatched.exceptionOrNull()?.message ?: "ok"})"
-                )
-            }
-        }
-    }
-
-    /** Late hotspot-approval verifier; cancelled by the next toggle. */
-    private var hotspotLateVerifyJob: kotlinx.coroutines.Job? = null
-
-    /**
-     * Launches MainActivity (single top) with the toggle-permissions extra
-     * when a runtime grant for the tethering rows is missing. Fires at most
-     * once per overlay session so failed toggles never loop the dialog; the
-     * "user has never rejected it" filtering happens in MainActivity, which
-     * is the only place shouldShowRequestPermissionRationale is readable.
-     */
-    private var togglePermissionsRequested = false
-    private fun maybeRequestTogglePermissions() {
-        if (togglePermissionsRequested) return
-        val missing = toggleRowPermissions().any { perm ->
-            runCatchingLogged(TAG, "Permission check failed") {
-                checkSelfPermission(perm) != android.content.pm.PackageManager.PERMISSION_GRANTED
-            } == true
-        }
-        if (!missing) return
-        togglePermissionsRequested = true
-        runCatchingLogged(TAG, "Toggle permission request launch failed") {
-            val intent = Intent(this, com.agupta07505.smartisland.MainActivity::class.java)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                .putExtra(
-                    com.agupta07505.smartisland.MainActivity.EXTRA_REQUEST_TOGGLE_PERMISSIONS,
-                    true
-                )
-            startActivity(intent)
-        }
-    }
-
-    /**
-     * Runtime grants the hotspot / tethering toggle rows rely on. The
-     * toggles themselves are dispatched with shell-level privileges through
-     * the Shizuku user service and need NO app permission; these grants
-     * unblock the in-app state readers (Bluetooth adapter queries,
-     * Wi-Fi/hotspot state checks) so the rows can verify and display state.
-     */
-    private fun toggleRowPermissions(): List<String> {
-        val wanted = mutableListOf<String>()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            wanted.add(android.Manifest.permission.BLUETOOTH_CONNECT)
-        }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            wanted.add(android.Manifest.permission.NEARBY_WIFI_DEVICES)
-        }
-        return wanted
-    }
-
-    /**
-     * Best-effort Wi-Fi hotspot state reader, shared with the idle info menu
-     * (HotspotUtil). Returns true/false when readable, null when this device
-     * offers no reliable read.
-     */
-    private fun readTetheringState(): Boolean? = HotspotUtil.isWifiTetheringActive(this)
-
-    /**
-     * LIVE tethering state for the toggle's direction decision. The shell-uid
-     * user service is asked FIRST — its TetheringManager read is the
-     * platform's authoritative tethered-iface list and always answers, while
-     * the app-process readers below can be reflection-blocked on modern
-     * Android (returning null forever, which made every tap compute "turn
-     * ON" as the target and turned the row into a one-way switch).
-     *
-     * Falls back to [readTetheringState] (HotspotUtil layering) when the
-     * user service has no answer (Shizuku offline / permission missing).
-     */
-    private suspend fun readTetheringStateLive(): Boolean? {
-        if (ShizukuManager.isBinderAvailable()) {
-            val ifaces = ShizukuManager.tetheredIfacesViaUserService()
-            if (ifaces != null) {
-                val set = ifaces.split("|")
-                    .filter { it.isNotBlank() }
-                    .map { it.lowercase() }
-                    .toSet()
-                // Empty set = the platform definitively reports nothing
-                // tethering; any non-matching iface also means "not wifi".
-                return HotspotUtil.ifacesMatchKind(set, "wifi")
-            }
-        }
-        return readTetheringState()
-    }
-
-    /**
      * Finds a Quick Settings tile across the SystemUI windows by label.
      * A candidate matches when its content description or text contains
      * [mustContain] (case-insensitive) and NONE of [excludeContains]; it
@@ -1650,15 +1477,6 @@ class SmartIslandOverlayService : AccessibilityService() {
                     openedSomething = false
                     toggleBluetoothViaShade()
                 }
-                "hotspot" -> {
-                    // Toggle the Wi-Fi hotspot in place (TetheringManager via
-                    // the Shizuku user service) instead of opening the
-                    // hotspot settings page — same spirit as the Bluetooth
-                    // row: no dialogs, no settings pages, no Quick Settings
-                    // panel, island stays visible, menu stays open.
-                    openedSomething = false
-                    toggleTetheringViaShizuku(label = "Hotspot")
-                }
             }
         }
         if (openedSomething) {
@@ -1823,16 +1641,20 @@ class SmartIslandOverlayService : AccessibilityService() {
         private const val OVERLAY_CHANNEL_ID = "smart_island_overlay"
         private const val OVERLAY_CHANNEL_NAME = "Smart Island overlay"
         // The ONE and ONLY expanded→collapsed window resize (where the
-        // touchableRegion reflection is unavailable), timed exactly like the
-        // ORIGINAL upstream (github.com/agupta07505/SmartIsland,
-        // AUTO_COLLAPSE_DELAY_MS = 220). Device testing showed the raw resize
-        // transient is NOT invisible — SurfaceFlinger stretched the old
-        // full-screen buffer into the narrow window (the "duplicate island"
-        // glitch) — so on those devices the resize now runs through
-        // resizeWindowMasked(); on touchableRegion devices there is no resize
-        // at all (the window is MATCH_PARENT in every state). The settled
-        // collapsed state is never touched by a window resize either way.
-        private const val AUTO_COLLAPSE_DELAY_MS = 220L
+        // touchableRegion reflection is unavailable). Device testing (rounds
+        // O–Q) showed BOTH the raw resize transient (SurfaceFlinger stretches
+        // the old full-screen buffer into the narrow window — the "duplicate
+        // island") AND the masked-resize blink are conspicuous when they fire
+        // MID-MORPH: the island vanished ("flashed into the idle state") and
+        // popped back at the end of the animation. The springs (stiffness 520,
+        // damping .72–.76) are visually settled after ~300ms, so the resize
+        // now waits them out: the morph plays out entirely inside the stable
+        // full-screen window — exactly the original's animation path — and
+        // the ~100ms mask/blink happens once the pill is at rest, where the
+        // pre- and post-resize frames are identical and the blink is the
+        // least perceptible it can be. On touchableRegion devices there is
+        // no resize at all (the window is MATCH_PARENT in every state).
+        private const val AUTO_COLLAPSE_DELAY_MS = 420L
 
         // Masked-resize timing (touchableRegion-less devices): the first value
         // is how long the transparent buffer gets to render BEFORE the window
@@ -1840,11 +1662,6 @@ class SmartIslandOverlayService : AccessibilityService() {
         // first layout at the NEW size before the mask is dropped anyway.
         private const val WINDOW_MASK_SETTLE_MS = 40L
         private const val WINDOW_MASK_MAX_WAIT_MS = 150L
-
-        // How long the toggle keeps polling the authoritative tethered-iface
-        // list after a failed dispatch: a carrier approval granted after the
-        // dispatcher's answer window still brings the hotspot up.
-        private const val HOTSPOT_LATE_VERIFY_MS = 45_000L
     }
 
     /**

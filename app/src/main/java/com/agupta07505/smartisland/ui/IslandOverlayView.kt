@@ -195,8 +195,7 @@ fun IslandOverlayView(
         settings.idleTapMode,
         settings.idleInfoShowTime,
         settings.idleInfoShowBattery,
-        settings.idleInfoShowBluetooth,
-        settings.idleInfoShowHotspot
+        settings.idleInfoShowBluetooth
     ) {
         if (notifications.isEmpty()) {
             if (isIdleInfoExpand) {
@@ -256,7 +255,15 @@ fun IslandOverlayView(
     // bounds around the content and can never shift or teleport it (and no
     // per-frame window/compensation animation is needed, which is what made
     // the collapsed island shake before).
-    val collapsedMainOffset = settings.xOffset.dp
+    // Screen-anchored collapsed X target. IDLE X DECOUPLING: the idle
+    // punch-hole pill uses its OWN x (settings.idleXOffset, anchored to the
+    // camera hole by the auto-detect) — NOT the wide island's xOffset.
+    // Applying the wide island's x to the idle pill made every dismiss-to-idle
+    // morph slide the tiny pill sideways from the expanded card's center to
+    // the wide island's position, which read as "the idle pill comes from the
+    // left and then snaps to the correct position". With the idle pill at its
+    // own x the morph shrinks IN PLACE.
+    val collapsedMainOffset = (if (isIdle) settings.idleXOffset else settings.xOffset).dp
     // Expanded card top offset. The base clears the status bar (and the
     // companion mini-pill when one exists); the wide-Y delta then applies the
     // precision-tuning "vertical offset" WITHOUT moving the window: the
@@ -639,7 +646,32 @@ fun IslandOverlayView(
                                         }
                                     }
                                 } else {
-                                    if (!isDragging || abs(dragOffset) < 10f) {
+                                    if (isDragging && dragOffset < swipeUpThreshold) {
+                                        // COLLAPSED-pill dismiss: hold + pull up works on
+                                        // the pill itself, not only on the expanded card —
+                                        // the gesture must discard the notification from
+                                        // wherever the user grabs it. Plain swipe-up
+                                        // resolves to swipeUpAction, a registered hold to
+                                        // holdSwipeUpAction. COLLAPSE is meaningless here
+                                        // (already collapsed) and FLOATING_WINDOW needs the
+                                        // card's content, so only the dismiss actions fire.
+                                        val action = if (isHoldRegistered || totalElapsedMs >= HOLD_GESTURE_THRESHOLD_MS) {
+                                            currentSettings.holdSwipeUpAction
+                                        } else {
+                                            currentSettings.swipeUpAction
+                                        }
+                                        when (action) {
+                                            SmartIslandSettings.GestureActions.DISMISS_ALL -> {
+                                                firedSwipeAction = true
+                                                currentOnDismissAll()
+                                            }
+                                            SmartIslandSettings.GestureActions.DISMISS -> {
+                                                firedSwipeAction = true
+                                                currentOnDismiss()
+                                            }
+                                            else -> Unit
+                                        }
+                                    } else if (!isDragging || abs(dragOffset) < 10f) {
                                         if (!downConsumedByChild) {
                                             when (currentSettings.tapAction) {
                                                 SmartIslandSettings.GestureActions.TOGGLE -> currentOnToggle()
@@ -660,14 +692,18 @@ fun IslandOverlayView(
                                 val dragAmount = change.positionChange().y
                                 if (abs(dragAmount) > 0.5f) {
                                     isDragging = true
-                                    if (currentExpanded) {
-                                        change.consume()
-                                        dragAccumulator += dragAmount
-                                        dragOffset = dragAccumulator.coerceIn(
-                                            -DRAG_MAX_OFFSET_DP * displayMetrics.density,
-                                            DRAG_MAX_OFFSET_DP * displayMetrics.density
-                                        )
-                                    }
+                                    // Tracked and consumed in BOTH states: the collapsed
+                                    // pill owns its vertical drags too (it has no child
+                                    // that wants them), so hold + swipe-up can fire from
+                                    // the pill itself. The drag also feeds the visual
+                                    // translation — the pill follows the finger and
+                                    // springs back on release.
+                                    change.consume()
+                                    dragAccumulator += dragAmount
+                                    dragOffset = dragAccumulator.coerceIn(
+                                        -DRAG_MAX_OFFSET_DP * displayMetrics.density,
+                                        DRAG_MAX_OFFSET_DP * displayMetrics.density
+                                    )
                                 }
                             }
                         }
