@@ -57,6 +57,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.coroutines.resume
 
 import javax.inject.Inject
 
@@ -401,7 +404,7 @@ class SmartIslandOverlayService : AccessibilityService() {
                     collapseJob?.cancel()
                     if (expanded) {
                         isWindowExpanded = true
-                        updateWindowLayoutParams(true, viewModel.settings.value)
+                        resizeWindowMasked(expanded = true)
                         // Pre-bind the Shizuku user service while the menu is
                         // opening so the first hotspot tap dispatches
                         // immediately instead of paying the cold-start bind
@@ -418,7 +421,7 @@ class SmartIslandOverlayService : AccessibilityService() {
                         collapseJob = serviceScope.launch {
                             kotlinx.coroutines.delay(AUTO_COLLAPSE_DELAY_MS)
                             isWindowExpanded = false
-                            updateWindowLayoutParams(false, viewModel.settings.value)
+                            resizeWindowMasked(expanded = false)
                         }
                     }
                 }
@@ -696,7 +699,23 @@ class SmartIslandOverlayService : AccessibilityService() {
                     isTouchableRegionSupported = true
                     android.util.Log.d(TAG, "OnComputeInternalInsetsListener successfully registered on live ViewTreeObserver")
                     if (::viewModel.isInitialized && !isWindowExpanded) {
-                        updateWindowLayoutParams(false, viewModel.settings.value)
+                        // Post-boot window normalization (the initial window is
+                        // created before we know whether the reflection works,
+                        // so it is narrow; once the listener is alive the
+                        // touchableRegion class goes full-screen in both axes).
+                        // Routed through the masked resize so the one-time
+                        // narrow→full transition cannot ghost either.
+                        serviceScope.launch {
+                            runSuspendCatchingLogged(TAG, "Masked window normalization failed") {
+                                // forceMask: even on the touchableRegion class
+                                // THIS resize is real (the initial window was
+                                // created narrow before the reflection could be
+                                // probed) — the steady-state short-circuit only
+                                // applies to expand/collapse, which no longer
+                                // resize anything on that class.
+                                resizeWindowMasked(expanded = false, forceMask = true)
+                            }
+                        }
                     }
                 }
             }
@@ -772,12 +791,28 @@ class SmartIslandOverlayService : AccessibilityService() {
         // Compose inside one stable window (identical to the original's
         // animation path), and the single 220ms resize only swaps the clip
         // bounds after the springs are past the visible-motion phase.
-        val h = if (expanded) {
+        //
+        // RESIZE GHOST (device-tested 2026-09): any frame-size change makes
+        // SurfaceFlinger stretch the LAST submitted buffer into the new
+        // window bounds until the app's first frame at the new size arrives.
+        // The user saw exactly that: streaks at the top left/right corners
+        // on expand (the short collapsed strip stretched across the screen)
+        // and a squashed "duplicate island" right after the collapse morph.
+        // So on devices WHERE the touchableRegion reflection works the window
+        // is now MATCH_PARENT in BOTH axes in EVERY state — expand/collapse
+        // never resizes anything, and the ghost class is structurally gone
+        // (touch passthrough is unaffected: the region listener still
+        // restricts touches to the pill group). Devices WITHOUT the
+        // reflection must keep the narrow collapsed window (it IS their touch
+        // containment), so their resizes go through [resizeWindowMasked]
+        // which draws the buffer transparent across the transition instead.
+        val alwaysFullScreen = isTouchableRegionSupported
+        val h = if (expanded || alwaysFullScreen) {
             WindowManager.LayoutParams.MATCH_PARENT
         } else {
             ((settings.height + 16f) * density).toInt()
         }
-        val w = if (expanded || isTouchableRegionSupported) {
+        val w = if (expanded || alwaysFullScreen) {
             WindowManager.LayoutParams.MATCH_PARENT
         } else {
             collapsedWidthPx
@@ -831,6 +866,77 @@ class SmartIslandOverlayService : AccessibilityService() {
         lastParams = params
         runCatchingLogged(TAG, "Failed to update view layout") { 
             windowManager.updateViewLayout(view, params) 
+        }
+    }
+
+    /**
+     * Window resize with the ghost masked out (devices WITHOUT the
+     * touchableRegion reflection — those still need the narrow collapsed
+     * window, and any frame-size change would otherwise stretch the last
+     * buffer into the new bounds: the "duplicate island" the user reported).
+     *
+     * Sequence: raise the Compose-side mask (the overlay draws a fully
+     * transparent buffer) → wait for that buffer to be presented → resize →
+     * wait for the first layout at the new size → drop the mask. The
+     * stretched frames are all transparent, so nothing wrong ever becomes
+     * visible; the cost is a ~60-80ms window in which the island is invisible
+     * (a blink at the morph's edge, far less noticeable than the ghost).
+     *
+     * Cancellation-safe: collectLatest cancels this on rapid toggles, and the
+     * finally-block releases the mask so the island can never stay hidden.
+     */
+    private suspend fun resizeWindowMasked(expanded: Boolean, forceMask: Boolean = false) {
+        if ((!forceMask && isTouchableRegionSupported) || islandView == null) {
+            // Full-screen in every state: updateWindowLayoutParams is a no-op
+            // (params already match) and there is no resize to mask.
+            updateWindowLayoutParams(expanded, viewModel.settings.value)
+            return
+        }
+        viewModel.windowResizeMask.value = true
+        try {
+            // Let at least one frame render with the transparent buffer BEFORE
+            // the resize: 40ms covers two 60Hz vsync periods (and several more
+            // at 90/120Hz), so SurfaceFlinger has the empty buffer in hand.
+            delay(WINDOW_MASK_SETTLE_MS)
+            updateWindowLayoutParams(expanded, viewModel.settings.value)
+            awaitNextLayoutOrTimeout()
+        } finally {
+            viewModel.windowResizeMask.value = false
+        }
+    }
+
+    /**
+     * Resumes on the first OnGlobalLayout callback after a resize (the view's
+     * first traversal at the new window size), bounded by a short timeout so a
+     * quiet relayout can never wedge the mask on.
+     */
+    private suspend fun awaitNextLayoutOrTimeout() {
+        val view = islandView ?: return
+        withTimeoutOrNull(WINDOW_MASK_MAX_WAIT_MS) {
+            suspendCancellableCoroutine { continuation ->
+                val observer = view.viewTreeObserver
+                val listener = object : android.view.ViewTreeObserver.OnGlobalLayoutListener {
+                    override fun onGlobalLayout() {
+                        if (observer.isAlive) {
+                            observer.removeOnGlobalLayoutListener(this)
+                        }
+                        if (continuation.isActive) {
+                            continuation.resume(Unit)
+                        }
+                    }
+                }
+                runCatching {
+                    observer.addOnGlobalLayoutListener(listener)
+                }.onFailure {
+                    if (continuation.isActive) continuation.resume(Unit)
+                    return@suspendCancellableCoroutine
+                }
+                continuation.invokeOnCancellation {
+                    if (observer.isAlive) {
+                        runCatching { observer.removeOnGlobalLayoutListener(listener) }
+                    }
+                }
+            }
         }
     }
 
@@ -900,11 +1006,18 @@ class SmartIslandOverlayService : AccessibilityService() {
         val notificationCount = if (::viewModel.isInitialized) viewModel.notifications.value.size else 0
         // Initial collapsed window: horizontally centered (x = 0) like every
         // other window state, sized to contain the screen-anchored collapsed
-        // content (see collapsedWindowWidthPx).
+        // content (see collapsedWindowWidthPx). On touchableRegion devices the
+        // window is born MATCH_PARENT in both axes so expand/collapse NEVER
+        // resizes it (see updateWindowLayoutParams — resize ghosts).
         val w = if (isTouchableRegionSupported) {
             WindowManager.LayoutParams.MATCH_PARENT
         } else {
             collapsedWindowWidthPx(settings, notificationCount, density)
+        }
+        val h = if (isTouchableRegionSupported) {
+            WindowManager.LayoutParams.MATCH_PARENT
+        } else {
+            ((settings.height + 16f) * density).toInt()
         }
         val currentFlags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
             WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
@@ -1684,17 +1797,24 @@ class SmartIslandOverlayService : AccessibilityService() {
         private const val WINDOWING_MODE_FREEFORM = 5
         private const val OVERLAY_CHANNEL_ID = "smart_island_overlay"
         private const val OVERLAY_CHANNEL_NAME = "Smart Island overlay"
-        // The ONE and ONLY expanded→collapsed window resize, timed exactly
-        // like the ORIGINAL upstream (github.com/agupta07505/SmartIsland,
-        // AUTO_COLLAPSE_DELAY_MS = 220): the window narrows MID-MORPH — while
-        // the springs are still moving fast — where the surface-resize
-        // transient is invisible. The expanded window is full-screen
-        // (MATCH_PARENT), so the collapse morph before this point is pure
-        // Compose with zero window churn (the former content-sized expanded
-        // window turned every collapse into a mid-morph relayout whose
-        // transient displaced the rendered pill/bubbles LEFT). The settled
-        // collapsed state is never touched by a window resize.
+        // The ONE and ONLY expanded→collapsed window resize (where the
+        // touchableRegion reflection is unavailable), timed exactly like the
+        // ORIGINAL upstream (github.com/agupta07505/SmartIsland,
+        // AUTO_COLLAPSE_DELAY_MS = 220). Device testing showed the raw resize
+        // transient is NOT invisible — SurfaceFlinger stretched the old
+        // full-screen buffer into the narrow window (the "duplicate island"
+        // glitch) — so on those devices the resize now runs through
+        // resizeWindowMasked(); on touchableRegion devices there is no resize
+        // at all (the window is MATCH_PARENT in every state). The settled
+        // collapsed state is never touched by a window resize either way.
         private const val AUTO_COLLAPSE_DELAY_MS = 220L
+
+        // Masked-resize timing (touchableRegion-less devices): the first value
+        // is how long the transparent buffer gets to render BEFORE the window
+        // resize (two 60Hz vsync periods), the second bounds the wait for the
+        // first layout at the NEW size before the mask is dropped anyway.
+        private const val WINDOW_MASK_SETTLE_MS = 40L
+        private const val WINDOW_MASK_MAX_WAIT_MS = 150L
     }
 
     /**

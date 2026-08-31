@@ -36,6 +36,7 @@ fun OverlayIsland(
     val selectedIndex by viewModel.selectedIndex.collectAsState()
     val isLocked by viewModel.isLocked.collectAsState()
     val isInputActive by viewModel.isInputActive.collectAsState()
+    val windowResizeMask by viewModel.windowResizeMask.collectAsState()
     val menuFeedback by viewModel.menuFeedback.collectAsState()
     val reappearTick by viewModel.reappearTick.collectAsState()
     val context = LocalContext.current
@@ -96,6 +97,7 @@ fun OverlayIsland(
         onOpenFloatingWindow = onOpenFloatingWindow,
         statusBarHeight = statusBarHeight,
         isInputActive = isInputActive,
+        windowResizeMask = windowResizeMask,
         onReplyStateChanged = { viewModel.setInputActive(it) },
         onOpenIdleInfoItem = onOpenIdleInfoItem,
         menuFeedback = menuFeedback,

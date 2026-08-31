@@ -65,6 +65,16 @@ class IslandViewModel(
     val isLocked = MutableStateFlow(false)
     val isInputActive = MutableStateFlow(false)
 
+    // Set by the service around a window-frame resize on devices WITHOUT the
+    // touchableRegion reflection. During a resize SurfaceFlinger stretches the
+    // last submitted buffer into the new window bounds, which renders a ghost
+    // duplicate of the island (streaks across the top corners on expand, a
+    // squashed "second island" on collapse). While this flag is on, the overlay
+    // composable draws a fully transparent buffer, so the stretched frame is
+    // invisible. Devices WITH the reflection never resize their window at all
+    // and never raise this flag.
+    val windowResizeMask = MutableStateFlow(false)
+
     // Transient feedback rendered INSIDE the expanded island (e.g. by the idle
     // info menu). The test device suppresses Toasts for this app, so actions
     // like the Bluetooth toggle report their result here instead.

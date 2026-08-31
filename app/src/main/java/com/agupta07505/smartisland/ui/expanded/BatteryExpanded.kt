@@ -351,16 +351,23 @@ private fun readChargingStats(context: Context): ChargingStats? {
 
     // Live charging power. EXTRA_VOLTAGE is millivolts but a few OEMs report
     // microvolts — normalize before the math; CURRENT_NOW is microamps and
-    // some devices invert its sign, so the magnitude is what is used here.
+    // some devices invert its sign or report milliamperes instead (see
+    // chargingWatts), so only magnitude + plausibility carry meaning here.
     val mvRaw = sticky.getIntExtra(BatteryManager.EXTRA_VOLTAGE, -1).toLong()
-    val mv = if (mvRaw > 100_000) mvRaw / 1000 else mvRaw
-    val ua = runCatching { bm.getLongProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW) }
-        .getOrDefault(0L)
-    val watts = if (mv in 1_000..100_000 && ua != 0L) {
-        ((mv * abs(ua)) / 1_000_000_000L).toInt()
-    } else {
-        null
+    val sysMv = readPowerSupplyLong("voltage_now")?.let { if (it > 100_000) it / 1000 else it } ?: -1L
+    val mv = when {
+        mvRaw in 1_000..100_000 -> mvRaw
+        sysMv in 1_000..100_000 -> sysMv
+        else -> -1L
     }
+    val currentRaw = runCatching { bm.getLongProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW) }
+        .getOrDefault(0L)
+    val effectiveCurrent = if (currentRaw != 0L) currentRaw else {
+        // Several OEMs never implement the property (reads 0) while the
+        // fuel-gauge sysfs node stays readable — same value, different door.
+        readPowerSupplyLong("current_now") ?: 0L
+    }
+    val watts = chargingWatts(mv, effectiveCurrent)
 
     val timeText = when {
         fullyCharged -> "Full"
@@ -371,8 +378,40 @@ private fun readChargingStats(context: Context): ChargingStats? {
         else -> estimateFromChargeCounter(bm, pct)
     }
 
-    return ChargingStats(true, fullyCharged, watts?.takeIf { it in 1..300 }, tempC, timeText)
+    return ChargingStats(true, fullyCharged, watts, tempC, timeText)
 }
+
+/**
+ * mV × raw current → watts with unit disambiguation.
+ *
+ * BATTERY_PROPERTY_CURRENT_NOW is nominally microamps, but a large family of
+ * OEM fuel-gauge drivers report MILLIAMPS through the same property — the µA
+ * interpretation then yields ~0.01 W, which the old plausibility filter
+ * silently dropped (the "no watts on my device" report). Both interpretations
+ * are computed and the one landing in the plausible 1..300 W band wins; the
+ * bands are three orders of magnitude apart, so they can never BOTH be
+ * plausible and the choice is unambiguous for any real charging current.
+ */
+private fun chargingWatts(mv: Long, rawCurrent: Long): Int? {
+    if (mv <= 0 || rawCurrent == 0L) return null
+    val i = abs(rawCurrent)
+    val uaWatts = (mv * i) / 1_000_000_000L // nominal µA reading
+    val maWatts = (mv * i) / 1_000_000L     // OEM mA reading
+    return when {
+        uaWatts in 1..300 -> uaWatts.toInt()
+        maWatts in 1..300 -> maWatts.toInt()
+        else -> null
+    }
+}
+
+/**
+ * Best-effort fuel-gauge sysfs read. The nodes are root-only on many devices
+ * (the read simply fails and the caller falls back), but stay world-readable
+ * on a meaningful set of builds — a free extra data source where allowed.
+ */
+private fun readPowerSupplyLong(node: String): Long? = runCatching {
+    java.io.File("/sys/class/power_supply/battery/$node").readText().trim().toLong()
+}.getOrNull()
 
 /**
  * Below-P fallback for the time-to-full estimate: remaining charge (derived
@@ -385,9 +424,12 @@ private fun estimateFromChargeCounter(bm: BatteryManager, pct: Int): String? {
     if (pct !in 1..99) return null
     val chargeUah = runCatching { bm.getLongProperty(BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER) }
         .getOrDefault(0L)
-    val ua = runCatching { bm.getLongProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW) }
+    val uaRaw = runCatching { bm.getLongProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW) }
         .getOrDefault(0L)
-    if (chargeUah <= 0 || ua <= 0) return null
+    // Some drivers report the current negative while charging; the magnitude
+    // is what the integration needs, and 0 means "no sensor" (→ no estimate).
+    val ua = abs(if (uaRaw != 0L) uaRaw else readPowerSupplyLong("current_now") ?: 0L)
+    if (chargeUah <= 0 || ua == 0L) return null
     val remainingUah = chargeUah * 100L / pct
     val ms = (remainingUah.toDouble() / ua.toDouble() * 3_600_000.0).toLong()
     if (ms < 60_000L || ms > 12L * 3_600_000L) return null

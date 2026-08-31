@@ -64,6 +64,7 @@ import com.agupta07505.smartisland.model.IslandMode
 import com.agupta07505.smartisland.model.IslandNotification
 import com.agupta07505.smartisland.data.LaunchableApp
 import com.agupta07505.smartisland.ui.expanded.idleInfoMenuHeightDp
+import com.agupta07505.smartisland.ui.expanded.idleInfoMenuWidthDp
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.Image
@@ -96,6 +97,11 @@ fun IslandOverlayView(
     statusBarHeight: Float,
     modifier: Modifier = Modifier,
     isInputActive: Boolean = false,
+    // True while the service is resizing the overlay window on devices without
+    // the touchableRegion reflection: draw a fully transparent buffer so the
+    // resize's stale-buffer stretch (the "ghost island" the user saw at the
+    // top corners / duplicated pill on collapse) has nothing to show.
+    windowResizeMask: Boolean = false,
     onReplyStateChanged: (Boolean) -> Unit = {},
     onDismissAllNotifications: () -> Unit = {},
     onOpenIdleInfoItem: (String) -> Unit = {},
@@ -158,6 +164,19 @@ fun IslandOverlayView(
     // With estimate == measurement the card never changes height after the
     // menu opens — no late overlay-window resize, hence zero post-settle
     // movement and a perfectly centered icon grid (see idleInfoMenuHeightDp).
+    //
+    // CONTENT-SIZED CARD (idle info): when the expanded state IS the idle info
+    // menu, the card also wraps its content horizontally — a 4-tile grid is
+    // ~232dp wide, not the 0.95-screen-width band the other pages use. The
+    // width target, the height estimate and the width handed to the content
+    // all derive from idleInfoMenuWidthDp so all three stay consistent.
+    val isIdleInfoExpand = notifications.isEmpty() &&
+        settings.idleTapMode == SmartIslandSettings.IdleTapModes.INFO
+    val expandedCardWidth = if (isIdleInfoExpand) {
+        idleInfoMenuWidthDp(settings)
+    } else {
+        expandedWidth
+    }
     val initialEstimatedHeight = remember(
         activeMode,
         notifications.isEmpty(),
@@ -168,9 +187,9 @@ fun IslandOverlayView(
         settings.idleInfoShowHotspot
     ) {
         if (notifications.isEmpty()) {
-            if (settings.idleTapMode == SmartIslandSettings.IdleTapModes.INFO) {
+            if (isIdleInfoExpand) {
                 // Card width minus the menu column's 12dp start+end padding.
-                idleInfoMenuHeightDp(settings, expandedWidth.value - 24f)
+                idleInfoMenuHeightDp(settings, expandedCardWidth.value - 24f)
             } else {
                 135.dp
             }
@@ -183,8 +202,8 @@ fun IslandOverlayView(
     LaunchedEffect(activeMode, notifications.isEmpty()) {
         if (!expanded) {
             expandedHeight = if (notifications.isEmpty()) {
-                if (settings.idleTapMode == SmartIslandSettings.IdleTapModes.INFO) {
-                    idleInfoMenuHeightDp(settings, expandedWidth.value - 24f)
+                if (isIdleInfoExpand) {
+                    idleInfoMenuHeightDp(settings, expandedCardWidth.value - 24f)
                 } else {
                     135.dp
                 }
@@ -256,7 +275,7 @@ fun IslandOverlayView(
     val isHiding = isIdleHiding || (settings.autoHidePill && isAutoHidden)
 
     val width by transition.animateDp(transitionSpec = { sizeSpec }, label = "islandWidth") {
-        if (it) expandedWidth else if (isHiding) 0.dp else effectiveWidth.dp
+        if (it) expandedCardWidth else if (isHiding) 0.dp else effectiveWidth.dp
     }
     val height by transition.animateDp(transitionSpec = { heightSpec }, label = "islandHeight") {
         if (it) expandedHeight else if (isHiding) 0.dp else effectiveHeight.dp
@@ -445,7 +464,12 @@ fun IslandOverlayView(
     }
 
     Box(
-        modifier = outerModifier,
+        modifier = outerModifier.graphicsLayer {
+            // Window-resize ghost mask: see IslandViewModel.windowResizeMask.
+            // A plain boolean read here recomposes nothing — graphicsLayer's
+            // lambda re-runs per value change without relayout.
+            alpha = if (windowResizeMask) 0f else 1f
+        },
         contentAlignment = Alignment.TopCenter
     ) {
 
@@ -694,7 +718,7 @@ fun IslandOverlayView(
                         onLaunchApp = onLaunchApp,
                         onCollapse = onToggleExpanded,
                         statusBarHeight = statusBarHeight.dp,
-                        expandedWidth = expandedWidth,
+                        expandedWidth = expandedCardWidth,
                         // Each mode owns its natural height. The launcher already
                         // supplies its own loading height and must not impose that
                         // minimum on compact call or battery content.

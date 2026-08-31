@@ -28,7 +28,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.animateContentSize
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.BatteryChargingFull
 import androidx.compose.material.icons.rounded.Bluetooth
 import androidx.compose.material.icons.rounded.BluetoothConnected
 import androidx.compose.material.icons.rounded.WifiTethering
@@ -105,11 +104,36 @@ fun idleInfoMenuHeightDp(settings: SmartIslandSettings, availableWidthDp: Float)
     return height.dp.coerceIn(IdleInfoMinHeight, IdleInfoMaxHeightDp.dp)
 }
 
+/**
+ * Natural width of the idle info menu card: the tiles' intrinsic extent plus
+ * the column paddings, so the card hugs its content instead of stretching to
+ * the 0.95-screen-width band the notification pages use (which read as an
+ * empty black slab around a tiny strip of icons).
+ *
+ * 8dp of slack is added on top of the exact intrinsic width: a FlowRow that
+ * fits EXACTLY can still wrap when density rounding costs a single pixel,
+ * and a wrapped second row would desync the height estimate (the exact
+ * post-settle-jump class of bug the centering fixes killed). With the slack
+ * the row can never wrap, so estimate == measurement stays byte-exact.
+ */
+fun idleInfoMenuWidthDp(settings: SmartIslandSettings): Dp {
+    val tileCount = listOf(
+        settings.idleInfoShowTime,
+        settings.idleInfoShowBattery,
+        settings.idleInfoShowBluetooth,
+        settings.idleInfoShowHotspot
+    ).count { it }
+    if (tileCount == 0) {
+        // "All info items are disabled" one-line fallback text.
+        return 160.dp
+    }
+    return (tileCount * 44f + (tileCount - 1) * 8f + 24f + 8f).dp
+}
+
 // Minimal palette: icons rest in muted grey and light up with a functional
 // accent only while the radio is actually on. White-on-black, no badges, no
 // labels — the menu reads as a quiet strip of glyphs.
 private val Muted = Color(0xFF8E99A4)
-private val MutedText = Color(0xFF9AA4AF)
 private val AccentOn = Color(0xFF10B981)
 private val AccentBluetooth = Color(0xFF2563EB)
 private val AccentHotspot = Color(0xFFF59E0B)
@@ -172,24 +196,16 @@ fun IdleInfoExpanded(
                 }
             }
             if (settings.idleInfoShowBattery) {
-                val batteryPct = state.batteryText.substringBefore(" ").removeSuffix("%").toFloatOrNull()
-                DataTile(
-                    icon = Icons.Rounded.BatteryChargingFull,
-                    label = "Battery",
-                    tint = if (state.batteryCharging) AccentOn else Muted,
-                    highlight = state.batteryCharging,
-                    highlightColor = AccentOn,
-                    // While charging the bolt prefix replaces the plain percent —
-                    // one glance says "plugged in", the accent tint says "green".
-                    badgeText = if (state.batteryCharging) {
-                        "⚡" + state.batteryText.substringBefore(" ")
-                    } else {
-                        state.batteryText.substringBefore(" ").ifEmpty { "--" }
-                    },
-                    // Real level micro-bar — the charging island's progress
-                    // paradigm in miniature. Inside the fixed 44dp tile, so
-                    // the menu height estimator stays byte-exact.
-                    progressFraction = batteryPct?.div(100f)?.coerceIn(0f, 1f)
+                // Text-only battery tile: the percentage IS the content. The
+                // material glyph and the micro progress bar were removed —
+                // the menu's design contract is a quiet strip of glyphs and
+                // the battery number carries more information than either
+                // decoration. Charging state reads through the color fade
+                // (white → charging green), nothing else.
+                val batteryPct = state.batteryText.substringBefore(" ")
+                PercentTile(
+                    text = batteryPct.ifEmpty { "--" },
+                    charging = state.batteryCharging
                 ) {
                     onItemClick(IDLE_ITEM_BATTERY)
                 }
@@ -278,71 +294,38 @@ private fun TimeTile(timeText: String, onClick: () -> Unit) {
 }
 
 /**
- * Data tile: a small glyph with a tiny one-line readout underneath (battery
- * percent). State shows through the tint only — no chrome, no borders.
+ * Battery tile: a single percentage readout on the same 44dp grid as the
+ * clock tile. No glyph, no bar — the charging state is the color transition.
  */
 @Composable
-private fun DataTile(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    label: String,
-    tint: Color,
-    highlight: Boolean,
-    highlightColor: Color,
-    badgeText: String,
-    progressFraction: Float? = null,
+private fun PercentTile(
+    text: String,
+    charging: Boolean,
     onClick: () -> Unit
 ) {
-    // State lighting animates like the charging island's ring/bar instead of
-    // snapping — the tint IS the state display, so it deserves a transition.
+    // Charging lights the number the way the toggle tiles light their glyphs —
+    // a 350ms fade instead of a snap, matching the rest of the menu.
     val animatedTint by animateColorAsState(
-        targetValue = tint,
+        targetValue = if (charging) AccentOn else Color.White,
         animationSpec = androidx.compose.animation.core.tween(durationMillis = 350),
-        label = "dataTileTint"
+        label = "batteryPctTint"
     )
     Box(
         modifier = Modifier
             .width(TileSize)
             .height(TileSize)
             .clip(RoundedCornerShape(TileCorner))
-            .background(if (highlight) highlightColor.copy(alpha = 0.14f) else Color.Transparent)
+            .background(Color.White.copy(alpha = 0.05f))
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
-        ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = label,
-                tint = animatedTint,
-                modifier = Modifier.size(15.dp)
-            )
-            Text(
-                text = badgeText,
-                color = MutedText,
-                fontSize = 9.sp,
-                lineHeight = 10.sp,
-                fontWeight = FontWeight.Medium,
-                textAlign = TextAlign.Center
-            )
-            if (progressFraction != null) {
-                Box(
-                    modifier = Modifier
-                        .padding(top = 2.dp)
-                        .width(26.dp)
-                        .height(2.dp)
-                        .background(Muted.copy(alpha = 0.25f), RoundedCornerShape(1.dp))
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth(progressFraction)
-                            .height(2.dp)
-                            .background(animatedTint, RoundedCornerShape(1.dp))
-                    )
-                }
-            }
-        }
+        Text(
+            text = text,
+            color = animatedTint,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            textAlign = TextAlign.Center
+        )
     }
 }
 

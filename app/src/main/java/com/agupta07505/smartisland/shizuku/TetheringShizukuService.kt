@@ -10,6 +10,7 @@ package com.agupta07505.smartisland.shizuku
 import android.annotation.SuppressLint
 import android.content.Context
 import android.util.Log
+import java.lang.reflect.Method
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
@@ -158,26 +159,88 @@ class TetheringShizukuService(private val context: Context) : ITetheringUserServ
     }
 
     /**
-     * TETHERING_WIFI start: startTethering(int, Executor,
-     * StartTetheringCallback) answers through the callback, so block on a
-     * latch and translate onTetheringFailed(resultCode) into the return value.
+     * TETHERING_WIFI start. The platform answers through the callback, so each
+     * attempt blocks on a latch and translates onTetheringFailed(resultCode)
+     * into the return value.
+     *
+     * Provisioning: several carriers (and several ROM builds) require a
+     * tethering entitlement check before the soft-AP may start. startTethering
+     * called WITHOUT the provisioning UI then refuses the request with
+     * TETHER_ERROR_PROVISIONING_FAILED (14) — the "system refused (code 14)
+     * [wifi]" the info menu reported — even though the same toggle from the
+     * system Settings works, because Settings runs the check WITH its UI.
+     *
+     * The dispatch therefore mirrors Settings:
+     *  1. the 4-arg startTethering(type, showProvisioningUi=false, …),
+     *  2. on failure the same call with showProvisioningUi=true — the platform
+     *     runs the carrier approval flow (it may briefly show a system
+     *     dialog/app; that is exactly what the stock toggle does),
+     *  3. if the UI attempt's latch times out (approval screens can outlive
+     *     any sane latch) the platform's tethered-iface list is polled for a
+     *     soft-AP interface before giving up — approval may land late but it
+     *     DID land,
+     *  4. ROMs that only expose the legacy 3-arg overload fall back to it.
      */
     private fun startTethering(manager: Any, type: Int): Int {
-        val managerClass = manager.javaClass
         val callbackClass = Class.forName("$MANAGER_CLASS\$StartTetheringCallback")
-        val start = managerClass.getMethod(
-            "startTethering",
-            Integer.TYPE,
-            Executor::class.java,
-            callbackClass
-        )
+        val managerClass = manager.javaClass
+        val fourArg = runCatching {
+            managerClass.getMethod(
+                "startTethering",
+                Integer.TYPE,
+                java.lang.Boolean.TYPE,
+                Executor::class.java,
+                callbackClass
+            )
+        }.getOrNull()
+        val threeArg = if (fourArg == null) {
+            runCatching {
+                managerClass.getMethod("startTethering", Integer.TYPE, Executor::class.java, callbackClass)
+            }.getOrNull()
+        } else {
+            null
+        }
+        if (fourArg == null && threeArg == null) {
+            Log.e(TAG, "No startTethering overload found on $managerClass")
+            return ERR_UNAVAILABLE
+        }
+
+        var firstFailure: Int
+        if (fourArg != null) {
+            val noUi = dispatchStartTethering(manager, fourArg, type, showProvisioningUi = false, timeoutMs = START_TIMEOUT_MS)
+            if (noUi == TETHER_ERROR_NO_ERROR) return noUi
+            firstFailure = noUi
+            Log.d(TAG, "startTethering(no-UI) -> $noUi, retrying with provisioning UI")
+            val withUi = dispatchStartTethering(manager, fourArg, type, showProvisioningUi = true, timeoutMs = PROVISIONING_TIMEOUT_MS)
+            if (withUi == TETHER_ERROR_NO_ERROR) return withUi
+            // The approval screen may still be up when the latch expires; the
+            // callback only fires after the whole flow finishes. Poll the
+            // platform's authoritative iface list before reporting failure.
+            if (softApAppeared(manager)) return TETHER_ERROR_NO_ERROR
+        } else {
+            val code = dispatchStartTethering(manager, threeArg!!, type, showProvisioningUi = null, timeoutMs = START_TIMEOUT_MS)
+            if (code == TETHER_ERROR_NO_ERROR) return code
+            firstFailure = code
+        }
+        return firstFailure
+    }
+
+    /** One startTethering attempt: reflective dispatch + bounded latch. */
+    private fun dispatchStartTethering(
+        manager: Any,
+        method: Method,
+        type: Int,
+        showProvisioningUi: Boolean?,
+        timeoutMs: Long
+    ): Int {
         val latch = CountDownLatch(1)
         var result = ERR_TIMEOUT
+        val callbackClass = method.parameterTypes.last()
         val callback = java.lang.reflect.Proxy.newProxyInstance(
             callbackClass.classLoader,
             arrayOf(callbackClass)
-        ) { _, method, args ->
-            when (method.name) {
+        ) { _, invoked, args ->
+            when (invoked.name) {
                 "onTetheringStarted" -> {
                     result = TETHER_ERROR_NO_ERROR
                     latch.countDown()
@@ -189,10 +252,30 @@ class TetheringShizukuService(private val context: Context) : ITetheringUserServ
             }
             null
         }
-        start.invoke(manager, type, DIRECT_EXECUTOR, callback)
-        latch.await(START_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-        Log.d(TAG, "startTethering($type) -> $result")
+        runCatching {
+            if (showProvisioningUi == null) {
+                method.invoke(manager, type, DIRECT_EXECUTOR, callback)
+            } else {
+                method.invoke(manager, type, showProvisioningUi, DIRECT_EXECUTOR, callback)
+            }
+        }.onFailure {
+            Log.e(TAG, "startTethering dispatch failed", it)
+            return ERR_UNAVAILABLE
+        }
+        latch.await(timeoutMs, TimeUnit.MILLISECONDS)
+        Log.d(TAG, "startTethering(type=$type, ui=$showProvisioningUi) -> $result")
         return result
+    }
+
+    /** True when a soft-AP interface shows up in the platform's tethered list. */
+    private fun softApAppeared(manager: Any): Boolean {
+        val kindPrefixes = arrayOf("ap", "swlan", "wlan")
+        val deadline = System.currentTimeMillis() + PROVISIONING_VERIFY_MS
+        while (System.currentTimeMillis() < deadline) {
+            if (tetheredIfacesOfType(manager, kindPrefixes)) return true
+            runCatching { Thread.sleep(400L) }
+        }
+        return false
     }
 
     /**
@@ -251,6 +334,12 @@ class TetheringShizukuService(private val context: Context) : ITetheringUserServ
         // several. 8s covers the observed worst cases without hanging the
         // toggle tap forever.
         private const val START_TIMEOUT_MS = 8000L
+
+        // The provisioning-UI attempt: the carrier approval flow (dialog, PIN,
+        // carrier app spin-up) runs before the callback fires, so the latch is
+        // longer; anything later is caught by the iface poll.
+        private const val PROVISIONING_TIMEOUT_MS = 12_000L
+        private const val PROVISIONING_VERIFY_MS = 6_000L
         private const val STOP_VERIFY_TIMEOUT_MS = 4000L
 
         private val DIRECT_EXECUTOR = Executor { it.run() }

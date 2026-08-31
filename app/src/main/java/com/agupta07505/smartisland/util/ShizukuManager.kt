@@ -609,10 +609,20 @@ object ShizukuManager {
         TetheringShizukuService.ERR_TIMEOUT -> "no answer (timeout)"
         TetheringShizukuService.ERR_STATE_UNCHANGED -> "state did not change"
         // TetheringManager.TETHER_ERROR_* (positive, stable since API 30).
+        // Code 14 (TETHER_ERROR_PROVISIONING_FAILED) is the carrier-entitlement
+        // refusal — the service now retries that case WITH the provisioning UI
+        // (Settings parity), so reaching the user usually means the approval
+        // flow itself failed or was dismissed.
+        2 -> "tethering service unavailable"
         3 -> "unsupported by system"
+        4 -> "tethering iface unavailable"
         5 -> "system internal error"
-        6 -> "missing TETHER_PRIVILEGED"
-        9 -> "provisioning refused"
+        6 -> "iface tethering failed"
+        7 -> "iface untether failed"
+        8 -> "missing CHANGE_TETHERING permission"
+        9 -> "missing ACCESS_TETHERING permission"
+        10 -> "unknown tethering type"
+        14 -> "carrier approval required"
         else -> "system refused (code $code)"
     }.let { text -> if (kind.isBlank()) text else "$text [$kind]" }
 
@@ -629,7 +639,11 @@ object ShizukuManager {
     private var tetheringServiceConnection: ServiceConnection? = null
 
     /** Bump whenever [TetheringShizukuService] or its AIDL changes shape. */
-    private const val USER_SERVICE_VERSION = 4
+    // v5: startTethering retries with showProvisioningUi=true when the
+    // no-UI attempt is refused (TETHER_ERROR_PROVISIONING_FAILED) and polls
+    // the iface list before giving up — the server process must be restarted
+    // so the old v4 code stops answering.
+    private const val USER_SERVICE_VERSION = 5
     private const val USER_SERVICE_BIND_TIMEOUT_MS = 9000L
     private const val USER_SERVICE_BIND_RETRY_MS = 4000L
     private const val TETHERED_IFACES_TIMEOUT_MS = 2000L
