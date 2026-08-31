@@ -20,6 +20,8 @@ import com.agupta07505.smartisland.shizuku.ITetheringUserService
 import com.agupta07505.smartisland.shizuku.TetheringShizukuService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import rikka.shizuku.Shizuku
@@ -575,7 +577,7 @@ object ShizukuManager {
     }
 
     /** Serializes user-service binds (poll vs warmup vs toggle). */
-    private val bindMutex = kotlinx.coroutines.sync.Mutex()
+    private val bindMutex = Mutex()
 
     /**
      * Pre-binds the tethering user service so the first hotspot tap dispatches
