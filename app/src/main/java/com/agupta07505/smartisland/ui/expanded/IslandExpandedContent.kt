@@ -11,9 +11,6 @@ package com.agupta07505.smartisland.ui.expanded
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-// Aliased: the pager's verticalAlignment takes the FOUNDATION Alignment
-// (Alignment.Vertical) while the rest of this file uses androidx.ui.Alignment.
-import androidx.compose.foundation.layout.Alignment as PagerAlignment
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -266,7 +263,7 @@ fun IslandExpandedContent(
                 // page measurements settled — the post-settle vertical drift
                 // of the icon grid. Top-aligned pages never move when other
                 // pages measure.
-                verticalAlignment = PagerAlignment.Top
+                verticalAlignment = Alignment.Top
             ) { page ->
                 if (showInfoPage && page == infoPageIndex) {
                     Box(
