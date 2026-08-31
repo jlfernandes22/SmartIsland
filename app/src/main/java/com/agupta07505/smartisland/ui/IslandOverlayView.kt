@@ -508,6 +508,14 @@ fun IslandOverlayView(
                         var isHoldRegistered = false
                         var dragAccumulator = 0f
                         var isDragging = false
+                        // Set when a swipe gesture FIRED an action (collapse,
+                        // dismiss, floating window). The return-to-rest below
+                        // is then a SNAP instead of the playful bouncy spring:
+                        // a MediumBouncy overshoot dragged the pill below its
+                        // rest position in the exact frames where the collapse
+                        // morph was resizing the window, which read as a
+                        // visual glitch on every swipe-up-to-collapse.
+                        var firedSwipeAction = false
 
                         val holdJob = scope.launch {
                             kotlinx.coroutines.delay(HOLD_GESTURE_THRESHOLD_MS)
@@ -536,15 +544,30 @@ fun IslandOverlayView(
                                             currentSettings.swipeUpAction
                                         }
                                         when (action) {
-                                            SmartIslandSettings.GestureActions.DISMISS_ALL -> currentOnDismissAll()
-                                            SmartIslandSettings.GestureActions.DISMISS -> currentOnDismiss()
-                                            SmartIslandSettings.GestureActions.COLLAPSE -> currentOnToggle()
+                                            SmartIslandSettings.GestureActions.DISMISS_ALL -> {
+                                                firedSwipeAction = true
+                                                currentOnDismissAll()
+                                            }
+                                            SmartIslandSettings.GestureActions.DISMISS -> {
+                                                firedSwipeAction = true
+                                                currentOnDismiss()
+                                            }
+                                            SmartIslandSettings.GestureActions.COLLAPSE -> {
+                                                firedSwipeAction = true
+                                                currentOnToggle()
+                                            }
                                             else -> Unit
                                         }
                                     } else if (isDragging && dragOffset > swipeDownThreshold) {
                                         when (currentSettings.swipeDownAction) {
-                                            SmartIslandSettings.GestureActions.FLOATING_WINDOW -> currentOnOpenFloatingWindow()
-                                            SmartIslandSettings.GestureActions.COLLAPSE -> currentOnToggle()
+                                            SmartIslandSettings.GestureActions.FLOATING_WINDOW -> {
+                                                firedSwipeAction = true
+                                                currentOnOpenFloatingWindow()
+                                            }
+                                            SmartIslandSettings.GestureActions.COLLAPSE -> {
+                                                firedSwipeAction = true
+                                                currentOnToggle()
+                                            }
                                             else -> Unit
                                         }
                                     } else if (!isDragging || abs(dragOffset) < 10f) {
@@ -591,15 +614,27 @@ fun IslandOverlayView(
 
                         holdJob.cancel()
                         if (dragOffset != 0f) {
-                            scope.launch {
-                                androidx.compose.animation.core.Animatable(dragOffset).animateTo(
-                                    targetValue = 0f,
-                                    animationSpec = spring(
-                                        dampingRatio = Spring.DampingRatioMediumBouncy,
-                                        stiffness = Spring.StiffnessMedium
-                                    )
-                                ) {
-                                    dragOffset = value
+                            if (firedSwipeAction) {
+                                // A swipe fired collapse/dismiss/etc: snap to
+                                // rest so the transition (window resize +
+                                // width spring + content crossfade) runs from
+                                // a settled pill with nothing else moving.
+                                dragOffset = 0f
+                            } else {
+                                // Cancelled drag (below threshold, gesture
+                                // consumed elsewhere, pointer lost): keep the
+                                // playful bouncy return — nothing else is
+                                // animating, so the bounce is pure delight.
+                                scope.launch {
+                                    androidx.compose.animation.core.Animatable(dragOffset).animateTo(
+                                        targetValue = 0f,
+                                        animationSpec = spring(
+                                            dampingRatio = Spring.DampingRatioMediumBouncy,
+                                            stiffness = Spring.StiffnessMedium
+                                        )
+                                    ) {
+                                        dragOffset = value
+                                    }
                                 }
                             }
                         }

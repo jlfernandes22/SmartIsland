@@ -69,7 +69,6 @@ import androidx.compose.ui.unit.sp
 import com.agupta07505.smartisland.R
 import com.agupta07505.smartisland.data.SmartIslandSettings
 import com.agupta07505.smartisland.data.SmartIslandSettingsRepository
-import com.agupta07505.smartisland.util.ShizukuManager
 import kotlinx.coroutines.launch
 
 import androidx.compose.material3.Surface
@@ -98,14 +97,6 @@ fun CustomizationsSection(
     var currentColorTarget by remember { mutableStateOf("") }
     var colorPickerTitle by remember { mutableStateOf("") }
     var initialColor by remember { mutableStateOf(0xFF10B981L) }
-    // Status-bar icon toggle: the disable-flag command runs through Shizuku
-    // asynchronously, so the switch is optimistic-gated (disabled while a
-    // dispatch is in flight) and reverts through the settings flow when the
-    // command failed. Result text renders inline because Toasts are
-    // suppressed on some devices.
-    var statusBarBusy by remember { mutableStateOf(false) }
-    var statusBarStatus by remember { mutableStateOf<String?>(null) }
-    var statusBarStatusIsError by remember { mutableStateOf(false) }
 
     if (showDialog) {
         RgbColorPickerDialog(
@@ -536,80 +527,9 @@ fun CustomizationsSection(
             }
         }
 
-        // Card: Status Bar Icons — hides the clock, system icons and
-        // notification icons (cmd statusbar send-disable-flag via Shizuku) so
-        // the island can take the status bar's place. The command is strict
-        // (exit-code checked): when it fails the switch stays untouched and
-        // the exact failure reason is shown inline below it.
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(20.dp),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)),
-            elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
-        ) {
-            Column(modifier = Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = stringResource(R.string.statusbar_icons_title),
-                            style = MaterialTheme.typography.bodyLarge,
-                            fontWeight = FontWeight.SemiBold,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                        Text(
-                            text = stringResource(R.string.statusbar_icons_desc),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    Spacer(Modifier.width(12.dp))
-                    Switch(
-                        checked = settings.statusBarIconsHidden,
-                        enabled = !statusBarBusy,
-                        onCheckedChange = { hide ->
-                            if (statusBarBusy) return@Switch
-                            scope.launch {
-                                statusBarBusy = true
-                                statusBarStatus = null
-                                val result = ShizukuManager.sendStatusBarDisableFlags(hide)
-                                if (result.isSuccess) {
-                                    repository.setStatusBarIconsHidden(hide)
-                                    statusBarStatusIsError = false
-                                    statusBarStatus =
-                                        if (hide) "Status bar icons hidden" else "Status bar icons restored"
-                                } else {
-                                    statusBarStatusIsError = true
-                                    val reason = result.exceptionOrNull()?.message
-                                    val action = if (hide) "hide" else "restore"
-                                    statusBarStatus = if (reason.isNullOrBlank()) {
-                                        "Couldn't $action the icons"
-                                    } else {
-                                        "Couldn't $action the icons — $reason"
-                                    }
-                                }
-                                statusBarBusy = false
-                            }
-                        }
-                    )
-                }
-                if (statusBarStatus != null) {
-                    Text(
-                        text = statusBarStatus.orEmpty(),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = if (statusBarStatusIsError) {
-                            MaterialTheme.colorScheme.error
-                        } else {
-                            MaterialTheme.colorScheme.primary
-                        }
-                    )
-                }
-            }
-        }
+        // NOTE: the "Status Bar Icons" switch moved to the Permissions Center
+        // (PermissionsSection) — it is Shizuku-powered system integration, not
+        // a color customization, and users could not find it here.
     }
 }
 

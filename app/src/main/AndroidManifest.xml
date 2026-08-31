@@ -29,6 +29,12 @@
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LAUNCHER" />
         </intent>
+        <!-- Shizuku provider visibility (Android 11+ package filtering):
+             the manager app AND Sui (root variant, rikka.sui) — without the
+             explicit package entries getPackageInfo() throws even when the
+             provider is installed. -->
+        <package android:name="moe.shizuku.privileged.api" />
+        <package android:name="rikka.sui" />
     </queries>
 
     <application

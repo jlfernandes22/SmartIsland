@@ -75,11 +75,16 @@ class TetheringShizukuService(private val context: Context) : ITetheringUserServ
      * The platform's own tethered-interface list, read in the shell-uid
      * process where hidden-API enforcement does not apply (the app process
      * gets reflection-blocked on the same read — see HotspotUtil). The app
-     * uses this to VERIFY that a toggle actually changed the tethering state;
-     * a null (empty) answer tells it to fall back to its own readers.
+     * uses this to VERIFY that a toggle actually changed the tethering state
+     * and to display the live hotspot state in the info menu.
+     *
+     * Returns null (never an empty string) when there is NO authoritative
+     * answer — the TetheringManager is unreachable — so the app knows to
+     * fall back to its own readers instead of reading "" as "definitively
+     * nothing is tethering".
      */
-    override fun getTetheredIfaces(): String {
-        val manager = tetheringManager() ?: return ""
+    override fun getTetheredIfaces(): String? {
+        val manager = tetheringManager() ?: return null
         return runCatching {
             @Suppress("UNCHECKED_CAST")
             val ifaces = manager.javaClass
@@ -88,7 +93,7 @@ class TetheringShizukuService(private val context: Context) : ITetheringUserServ
             ifaces?.joinToString("|") { it.lowercase() } ?: ""
         }.getOrElse {
             Log.e(TAG, "getTetheredIfaces failed", it)
-            ""
+            null
         }
     }
 

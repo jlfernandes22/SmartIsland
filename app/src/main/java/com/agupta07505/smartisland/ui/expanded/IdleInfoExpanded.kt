@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.animateContentSize
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.BatteryChargingFull
@@ -48,6 +49,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.agupta07505.smartisland.data.SmartIslandSettings
 import com.agupta07505.smartisland.util.HotspotUtil
+import com.agupta07505.smartisland.util.ShizukuManager
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -129,12 +131,22 @@ fun IdleInfoExpanded(
     val context = LocalContext.current
     // Battery/BT/hotspot/tethering reads are binder + reflection + interface
     // probes; run them on IO so the 1s menu refresh never janks the overlay's
-    // main thread.
+    // main thread. The hotspot read goes through the Shizuku user service
+    // FIRST (the platform's authoritative tethered-iface list — the in-app
+    // readers can be reflection-blocked, which used to pin the tile to
+    // "Tap to toggle" forever); HotspotUtil is the fallback.
     val state by produceState(
         initialValue = IdleDeviceState("", "", false, "", false, "")
     ) {
         while (true) {
-            value = withContext(Dispatchers.IO) { readDeviceState(context) }
+            value = withContext(Dispatchers.IO) {
+                val serviceIfaces = if (ShizukuManager.isBinderAvailable()) {
+                    ShizukuManager.tetheredIfacesViaUserService()
+                } else {
+                    null
+                }
+                readDeviceState(context, serviceIfaces)
+            }
             delay(1000L)
         }
     }
@@ -160,6 +172,7 @@ fun IdleInfoExpanded(
                 }
             }
             if (settings.idleInfoShowBattery) {
+                val batteryPct = state.batteryText.substringBefore(" ").removeSuffix("%").toFloatOrNull()
                 DataTile(
                     icon = Icons.Rounded.BatteryChargingFull,
                     label = "Battery",
@@ -172,7 +185,11 @@ fun IdleInfoExpanded(
                         "⚡" + state.batteryText.substringBefore(" ")
                     } else {
                         state.batteryText.substringBefore(" ").ifEmpty { "--" }
-                    }
+                    },
+                    // Real level micro-bar — the charging island's progress
+                    // paradigm in miniature. Inside the fixed 44dp tile, so
+                    // the menu height estimator stays byte-exact.
+                    progressFraction = batteryPct?.div(100f)?.coerceIn(0f, 1f)
                 ) {
                     onItemClick(IDLE_ITEM_BATTERY)
                 }
@@ -272,8 +289,16 @@ private fun DataTile(
     highlight: Boolean,
     highlightColor: Color,
     badgeText: String,
+    progressFraction: Float? = null,
     onClick: () -> Unit
 ) {
+    // State lighting animates like the charging island's ring/bar instead of
+    // snapping — the tint IS the state display, so it deserves a transition.
+    val animatedTint by animateColorAsState(
+        targetValue = tint,
+        animationSpec = androidx.compose.animation.core.tween(durationMillis = 350),
+        label = "dataTileTint"
+    )
     Box(
         modifier = Modifier
             .width(TileSize)
@@ -290,7 +315,7 @@ private fun DataTile(
             Icon(
                 imageVector = icon,
                 contentDescription = label,
-                tint = tint,
+                tint = animatedTint,
                 modifier = Modifier.size(15.dp)
             )
             Text(
@@ -301,6 +326,22 @@ private fun DataTile(
                 fontWeight = FontWeight.Medium,
                 textAlign = TextAlign.Center
             )
+            if (progressFraction != null) {
+                Box(
+                    modifier = Modifier
+                        .padding(top = 2.dp)
+                        .width(26.dp)
+                        .height(2.dp)
+                        .background(Muted.copy(alpha = 0.25f), RoundedCornerShape(1.dp))
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(progressFraction)
+                            .height(2.dp)
+                            .background(animatedTint, RoundedCornerShape(1.dp))
+                    )
+                }
+            }
         }
     }
 }
@@ -318,25 +359,38 @@ private fun ToggleTile(
     accent: Color,
     onClick: () -> Unit
 ) {
+    // Off → on fades the wash and lights the glyph the way the charging
+    // island fades its progress bar — state changes are transitions, not
+    // snaps.
+    val animatedTint by animateColorAsState(
+        targetValue = if (on) accent else Muted,
+        animationSpec = androidx.compose.animation.core.tween(durationMillis = 350),
+        label = "toggleTileTint"
+    )
+    val animatedBackground by animateColorAsState(
+        targetValue = if (on) accent.copy(alpha = 0.16f) else Color.Transparent,
+        animationSpec = androidx.compose.animation.core.tween(durationMillis = 350),
+        label = "toggleTileBackground"
+    )
     Box(
         modifier = Modifier
             .width(TileSize)
             .height(TileSize)
             .clip(RoundedCornerShape(TileCorner))
-            .background(if (on) accent.copy(alpha = 0.16f) else Color.Transparent)
+            .background(animatedBackground)
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
         Icon(
             imageVector = icon,
             contentDescription = label,
-            tint = if (on) accent else Muted,
+            tint = animatedTint,
             modifier = Modifier.size(20.dp)
         )
     }
 }
 
-private fun readDeviceState(context: Context): IdleDeviceState {
+private fun readDeviceState(context: Context, serviceIfaces: String?): IdleDeviceState {
     val now = System.currentTimeMillis()
     val timeText = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(now))
 
@@ -400,9 +454,18 @@ private fun readDeviceState(context: Context): IdleDeviceState {
 
     var hotspotText = "Off"
     runCatching {
-        // Layered reader: TetheringManager.getTetheredIfaces (the platform's
-        // own tethered list) → legacy WifiManager reflection → unknown.
-        val active = HotspotUtil.isWifiTetheringActive(context)
+        // Layered reader, authoritative first: the shell-uid user service's
+        // TetheringManager answer ("" = definitively nothing tethering) →
+        // in-app TetheringManager/WifiManager reflection → unknown.
+        val active = if (serviceIfaces != null) {
+            val set = serviceIfaces.split("|")
+                .filter { it.isNotBlank() }
+                .map { it.lowercase() }
+                .toSet()
+            HotspotUtil.ifacesMatchKind(set, "wifi")
+        } else {
+            HotspotUtil.isWifiTetheringActive(context)
+        }
         when (active) {
             true -> hotspotText = "On"
             null -> hotspotText = "Tap to toggle"

@@ -127,6 +127,8 @@
     <string name="shizuku_btn_run">Run Auto Setup</string>
     <string name="shizuku_btn_running">Running…</string>
     <string name="shizuku_not_running">Shizuku is not running or permission not granted</string>
+    <string name="shizuku_installed_not_running">A Shizuku provider (Shizuku or Sui) is installed but not running — open it and start the server, then try again</string>
+    <string name="shizuku_not_installed">No Shizuku provider found — install the Shizuku app (Play Store) or Sui (root devices)</string>
     <string name="shizuku_success">Permissions granted via Shizuku</string>
     <string name="shizuku_failed">Shizuku setup failed: %1$s</string>
     <string name="perm_accessibility_title">Accessibility Overlay</string>

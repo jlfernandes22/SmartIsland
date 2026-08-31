@@ -31,13 +31,31 @@ import kotlin.coroutines.resumeWithException
 object ShizukuManager {
 
     /**
-     * Checks if the Shizuku app is installed on the device.
-     * 100% crash proof against Throwable (including unit test stubs).
+     * Packages that can serve the Shizuku API. Besides the official Shizuku
+     * manager app (`moe.shizuku.privileged.api`), [Sui](https://github.com/RikkaApps/Sui)
+     * (`rikka.sui`) implements the exact same binder contract for rooted
+     * devices — hard-coding the Shizuku package name alone made every
+     * Shizuku-powered feature report "Not Installed" for Sui users even
+     * while the binder was fully alive (their OEM-autostart path worked,
+     * proving the binder itself was fine).
+     */
+    private val SHIZUKU_PROVIDER_PACKAGES = listOf(
+        "moe.shizuku.privileged.api",
+        "rikka.sui"
+    )
+
+    /**
+     * Checks whether a Shizuku-compatible provider is usable: a LIVE BINDER
+     * is the definitive answer (Sui users pass here with no Shizuku app
+     * installed), otherwise either provider package being visible counts.
+     * 100% crash proof against Throwable.
      */
     fun isInstalled(context: Context): Boolean {
+        if (isBinderAvailable()) return true
         return try {
-            context.packageManager.getPackageInfo("moe.shizuku.privileged.api", 0)
-            true
+            SHIZUKU_PROVIDER_PACKAGES.any { pkg ->
+                runCatching { context.packageManager.getPackageInfo(pkg, 0) }.isSuccess
+            }
         } catch (t: Throwable) {
             false
         }
@@ -117,6 +135,33 @@ object ShizukuManager {
         val error = errorBuilder.toString()
         val exitCode = process.waitFor()
         return ShizukuShellResult(exitCode, output, error)
+    }
+
+    /**
+     * The platform's tethered-interface list, read THROUGH the bound user
+     * service (shell uid, no hidden-API restrictions). This is the
+     * authoritative hotspot state the in-app readers cannot get: app-process
+     * TetheringManager reflection is blocked on modern Android and the
+     * legacy WifiManager fallback fails with it, which used to leave the
+     * info menu stuck on "Tap to toggle" AND made every tap compute
+     * "turn ON" as the target direction (before == null) — so a tap while
+     * the hotspot was UP never turned it OFF.
+     *
+     * @return the pipe-joined lowercase iface list ("" = definitively
+     *         nothing tethering), or null when there is no live user service
+     *         answer and the caller should fall back to its own readers.
+     */
+    suspend fun tetheredIfacesViaUserService(): String? = withContext(Dispatchers.IO) {
+        if (!isBinderAvailable() || !hasPermission()) return@withContext null
+        val service = tetheringUserService() ?: return@withContext null
+        try {
+            withTimeoutOrNull(TETHERED_IFACES_TIMEOUT_MS) { service.getTetheredIfaces() }
+        } catch (t: Throwable) {
+            // Dead binder mid-read: drop the cache so the next call rebinds.
+            android.util.Log.w("ShizukuManager", "getTetheredIfaces failed", t)
+            tetheringServiceBinder = null
+            null
+        }
     }
 
     private fun runShizukuCommands(commands: List<String>): Result<String> {
@@ -472,10 +517,28 @@ object ShizukuManager {
      * The service class runs inside the Shizuku server process; the version
      * in [UserServiceArgs] makes Shizuku restart it whenever the app updates
      * the class.
+     *
+     * Concurrent callers (the info menu's 1s state poll racing the menu-open
+     * warmup, or a toggle arriving mid-bind) are serialized through
+     * [bindMutex] so they share one bind instead of registering competing
+     * service connections.
      */
     private suspend fun tetheringServiceBinder(): IBinder? {
         tetheringServiceBinder?.let { return it }
-        val bound = withTimeoutOrNull(USER_SERVICE_BIND_TIMEOUT_MS) {
+        return bindMutex.withLock {
+            tetheringServiceBinder?.let { return it }
+            bindTetheringServiceBinder(USER_SERVICE_BIND_TIMEOUT_MS)
+                // A full-window timeout usually means the server was still
+                // spinning the service process up; it is alive moments later
+                // and the immediate retry answers instantly. The retry is
+                // deliberately shorter so a toggle never stacks two long
+                // waits back to back.
+                ?: bindTetheringServiceBinder(USER_SERVICE_BIND_RETRY_MS)
+        }
+    }
+
+    private suspend fun bindTetheringServiceBinder(timeoutMs: Long): IBinder? {
+        val bound = withTimeoutOrNull(timeoutMs) {
             suspendCancellableCoroutine { continuation ->
                 val connection = object : ServiceConnection {
                     override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
@@ -510,6 +573,9 @@ object ShizukuManager {
         }
         return bound
     }
+
+    /** Serializes user-service binds (poll vs warmup vs toggle). */
+    private val bindMutex = kotlinx.coroutines.sync.Mutex()
 
     /**
      * Pre-binds the tethering user service so the first hotspot tap dispatches
@@ -562,5 +628,7 @@ object ShizukuManager {
 
     /** Bump whenever [TetheringShizukuService] or its AIDL changes shape. */
     private const val USER_SERVICE_VERSION = 4
-    private const val USER_SERVICE_BIND_TIMEOUT_MS = 6000L
+    private const val USER_SERVICE_BIND_TIMEOUT_MS = 9000L
+    private const val USER_SERVICE_BIND_RETRY_MS = 4000L
+    private const val TETHERED_IFACES_TIMEOUT_MS = 2000L
 }

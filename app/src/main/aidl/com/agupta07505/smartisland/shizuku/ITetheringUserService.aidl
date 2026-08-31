@@ -58,13 +58,17 @@ interface ITetheringUserService {
      * The platform's live tethered-interface list (TetheringManager
      * .getTetheredIfaces()) read from the shell-uid process, where the
      * hidden-API reflection block that silences this read inside the app
-     * process does not apply. Pipe-separated interface names; empty string
-     * when the read is unavailable. Used to verify that a toggle actually
-     * changed the tethering state (HotspotUtil's in-process readers are
-     * reflection-blocked on modern Android and return null/unknown).
+     * process does not apply. Pipe-separated interface names. Used to verify
+     * that a toggle actually changed the tethering state and to display the
+     * live hotspot state in the info menu (HotspotUtil's in-process readers
+     * are reflection-blocked on modern Android and return null/unknown).
      *
-     * @return pipe-separated lowercase interface names, e.g. "ap0|wlan1",
-     *         or "" when the platform read is unavailable.
+     * @return pipe-separated lowercase interface names, e.g. "ap0|wlan1";
+     *         an EMPTY string means the platform definitively reports
+     *         nothing tethering right now; null means there is NO
+     *         authoritative answer (TetheringManager unreachable) and the
+     *         caller must fall back to its own readers — the two are never
+     *         conflated.
      */
     String getTetheredIfaces();
 

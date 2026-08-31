@@ -1352,6 +1352,8 @@ private fun DetailScreenHost(
                     overlayGranted = overlayGranted,
                     notificationGranted = notificationGranted,
                     batteryIgnored = batteryIgnored,
+                    settings = settings,
+                    repository = repository,
                     onOverlayClick = {
                         context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
                     },

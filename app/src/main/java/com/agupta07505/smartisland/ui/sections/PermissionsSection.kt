@@ -41,6 +41,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -58,6 +59,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.res.stringResource
 import com.agupta07505.smartisland.R
+import com.agupta07505.smartisland.data.SmartIslandSettings
+import com.agupta07505.smartisland.data.SmartIslandSettingsRepository
 import com.agupta07505.smartisland.ui.PermissionCard
 import com.agupta07505.smartisland.util.OemAutostartUtil
 import com.agupta07505.smartisland.util.ShizukuManager
@@ -69,6 +72,8 @@ fun PermissionsSection(
     overlayGranted: Boolean,
     notificationGranted: Boolean,
     batteryIgnored: Boolean = false,
+    settings: SmartIslandSettings,
+    repository: SmartIslandSettingsRepository,
     onOverlayClick: () -> Unit,
     onNotificationClick: () -> Unit,
     onBatteryClick: () -> Unit,
@@ -79,6 +84,12 @@ fun PermissionsSection(
     var isExecutingShizuku by remember { mutableStateOf(false) }
     var isOemAutostartEnabled by remember { mutableStateOf(batteryIgnored) }
     var isOverlayWarningDisabled by remember { mutableStateOf(false) }
+    // Status Bar Icons card state (moved here from Color Studio — the switch
+    // is Shizuku-powered system integration, not a color customization, and
+    // users could not find it buried under the color pickers).
+    var statusBarBusy by remember { mutableStateOf(false) }
+    var statusBarStatus by remember { mutableStateOf<String?>(null) }
+    var statusBarStatusIsError by remember { mutableStateOf(false) }
 
     Column(
         modifier = Modifier.fillMaxWidth(),
@@ -134,15 +145,22 @@ fun PermissionsSection(
                                 color = MaterialTheme.colorScheme.onSurface
                             )
                             val shizukuStateText = when {
-                                !ShizukuManager.isInstalled(context) -> "Not Installed"
-                                !ShizukuManager.isBinderAvailable() -> "Shizuku Not Running"
-                                !ShizukuManager.hasPermission() -> "Permission Required"
-                                else -> "Ready to Auto-Grant"
+                                // Binder-first: Sui (rikka.sui) users have a
+                                // fully working API with NO Shizuku package
+                                // installed, so the binder — not a package
+                                // lookup — is the source of truth. With the
+                                // old order this card read "Not Installed"
+                                // forever for Sui users while every Shizuku
+                                // feature actually worked.
+                                ShizukuManager.isBinderAvailable() && ShizukuManager.hasPermission() -> "Ready to Auto-Grant"
+                                ShizukuManager.isBinderAvailable() -> "Permission Required"
+                                ShizukuManager.isInstalled(context) -> "Shizuku Not Running"
+                                else -> "Not Installed"
                             }
                             Text(
                                 text = shizukuStateText,
                                 style = MaterialTheme.typography.labelMedium,
-                                color = if (ShizukuManager.hasPermission()) Color(0xFF0F9F6E) else MaterialTheme.colorScheme.primary,
+                                color = if (ShizukuManager.isBinderAvailable() && ShizukuManager.hasPermission()) Color(0xFF0F9F6E) else MaterialTheme.colorScheme.primary,
                                 fontWeight = FontWeight.SemiBold
                             )
                         }
@@ -152,16 +170,14 @@ fun PermissionsSection(
                         enabled = !isExecutingShizuku,
                         onClick = {
                             when {
-                                !ShizukuManager.isInstalled(context) -> {
-                                    Toast.makeText(context, context.getString(R.string.shizuku_not_running), Toast.LENGTH_LONG).show()
-                                }
-                                !ShizukuManager.isBinderAvailable() -> {
-                                    Toast.makeText(context, context.getString(R.string.shizuku_not_running), Toast.LENGTH_LONG).show()
-                                }
-                                !ShizukuManager.hasPermission() -> {
+                                // Binder-first (Sui-compatible): the binder is
+                                // the API — package detection is only needed
+                                // to tell a stopped provider from a missing
+                                // one in the error paths.
+                                ShizukuManager.isBinderAvailable() && !ShizukuManager.hasPermission() -> {
                                     ShizukuManager.requestPermission()
                                 }
-                                else -> {
+                                ShizukuManager.isBinderAvailable() -> {
                                     isExecutingShizuku = true
                                     scope.launch {
                                         val result = ShizukuManager.autoGrantAllPermissions(context)
@@ -175,6 +191,12 @@ fun PermissionsSection(
                                             Toast.makeText(context, context.getString(R.string.shizuku_failed, err.localizedMessage ?: ""), Toast.LENGTH_LONG).show()
                                         }
                                     }
+                                }
+                                ShizukuManager.isInstalled(context) -> {
+                                    Toast.makeText(context, context.getString(R.string.shizuku_installed_not_running), Toast.LENGTH_LONG).show()
+                                }
+                                else -> {
+                                    Toast.makeText(context, context.getString(R.string.shizuku_not_installed), Toast.LENGTH_LONG).show()
                                 }
                             }
                         },
@@ -416,6 +438,83 @@ fun PermissionsSection(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     lineHeight = 16.sp
                 )
+            }
+        }
+
+        // Card: Status Bar Icons — hides the clock, system icons and
+        // notification icons (cmd statusbar send-disable-flag via Shizuku) so
+        // the island can take the status bar's place. Lives in the Permissions
+        // Center because it is Shizuku-powered system integration (it used to
+        // sit at the bottom of Color Studio where nobody could find it). The
+        // command is strict (exit-code checked): when it fails the switch
+        // stays untouched and the exact failure reason is shown inline below.
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(20.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)),
+            elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+        ) {
+            Column(modifier = Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = stringResource(R.string.statusbar_icons_title),
+                            style = MaterialTheme.typography.bodyLarge,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = stringResource(R.string.statusbar_icons_desc),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    Switch(
+                        checked = settings.statusBarIconsHidden,
+                        enabled = !statusBarBusy,
+                        onCheckedChange = { hide ->
+                            if (statusBarBusy) return@Switch
+                            scope.launch {
+                                statusBarBusy = true
+                                statusBarStatus = null
+                                val result = ShizukuManager.sendStatusBarDisableFlags(hide)
+                                if (result.isSuccess) {
+                                    repository.setStatusBarIconsHidden(hide)
+                                    statusBarStatusIsError = false
+                                    statusBarStatus =
+                                        if (hide) "Status bar icons hidden" else "Status bar icons restored"
+                                } else {
+                                    statusBarStatusIsError = true
+                                    val reason = result.exceptionOrNull()?.message
+                                    val action = if (hide) "hide" else "restore"
+                                    statusBarStatus = if (reason.isNullOrBlank()) {
+                                        "Couldn't $action the icons"
+                                    } else {
+                                        "Couldn't $action the icons — $reason"
+                                    }
+                                }
+                                statusBarBusy = false
+                            }
+                        }
+                    )
+                }
+                if (statusBarStatus != null) {
+                    Text(
+                        text = statusBarStatus.orEmpty(),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (statusBarStatusIsError) {
+                            MaterialTheme.colorScheme.error
+                        } else {
+                            MaterialTheme.colorScheme.primary
+                        }
+                    )
+                }
             }
         }
     }

@@ -1162,7 +1162,7 @@ class SmartIslandOverlayService : AccessibilityService() {
         maybeRequestTogglePermissions()
         serviceScope.launch {
             runSuspendCatchingLogged(TAG, "$label toggle failed") {
-                val before = readTetheringState()
+                val before = readTetheringStateLive()
                 val target = before != true
                 if (::viewModel.isInitialized) {
                     viewModel.postMenuFeedback(
@@ -1251,6 +1251,33 @@ class SmartIslandOverlayService : AccessibilityService() {
      * offers no reliable read.
      */
     private fun readTetheringState(): Boolean? = HotspotUtil.isWifiTetheringActive(this)
+
+    /**
+     * LIVE tethering state for the toggle's direction decision. The shell-uid
+     * user service is asked FIRST — its TetheringManager read is the
+     * platform's authoritative tethered-iface list and always answers, while
+     * the app-process readers below can be reflection-blocked on modern
+     * Android (returning null forever, which made every tap compute "turn
+     * ON" as the target and turned the row into a one-way switch).
+     *
+     * Falls back to [readTetheringState] (HotspotUtil layering) when the
+     * user service has no answer (Shizuku offline / permission missing).
+     */
+    private suspend fun readTetheringStateLive(): Boolean? {
+        if (ShizukuManager.isBinderAvailable()) {
+            val ifaces = ShizukuManager.tetheredIfacesViaUserService()
+            if (ifaces != null) {
+                val set = ifaces.split("|")
+                    .filter { it.isNotBlank() }
+                    .map { it.lowercase() }
+                    .toSet()
+                // Empty set = the platform definitively reports nothing
+                // tethering; any non-matching iface also means "not wifi".
+                return HotspotUtil.ifacesMatchKind(set, "wifi")
+            }
+        }
+        return readTetheringState()
+    }
 
     /**
      * Finds a Quick Settings tile across the SystemUI windows by label.
