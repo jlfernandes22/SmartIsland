@@ -52,6 +52,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         SystemServiceRecovery.requestRecovery(this)
+        requestNotificationPermissionIfNeeded()
 
         if (intent?.getBooleanExtra(EXTRA_REQUEST_BLUETOOTH_PERMISSION, false) == true) {
             requestBluetoothPermissionIfNeeded()
@@ -69,6 +70,26 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    /**
+     * POST_NOTIFICATIONS (API 33+): the app posts its own notifications —
+     * the foreground-service status and the silent lock-screen unread
+     * mirrors — and without this runtime grant the system silently drops
+     * every one of them. Asked once on the first launch; rejections simply
+     * keep the island running without its own notifications.
+     */
+    private fun requestNotificationPermissionIfNeeded() {
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.TIRAMISU) return
+        val granted = checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
+    private val notificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { /* granted or not: the island works either way */ }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)

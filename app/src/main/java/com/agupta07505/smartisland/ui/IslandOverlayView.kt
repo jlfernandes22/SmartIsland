@@ -19,7 +19,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.ui.input.pointer.changedToUp
@@ -54,7 +53,6 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.unit.dp
@@ -70,16 +68,12 @@ import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.Call
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.FlashlightOn
 import androidx.compose.ui.res.painterResource
 import androidx.compose.material3.Icon
-import androidx.compose.material3.Text
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.sp
 
 @Composable
 fun IslandOverlayView(
@@ -276,19 +270,28 @@ fun IslandOverlayView(
     // Expanded card top offset. The base clears the status bar (and the
     // companion mini-pill when one exists); the wide-Y delta then applies the
     // precision-tuning "vertical offset" WITHOUT moving the window: the
-    // window always sits at the idle pill's y (see SmartIslandOverlayService),
-    // so the wide island's Y is decoupled from the idle punch-hole pill's Y
-    // and changing one slider can never displace the other.
+    // window always sits at y = 0 (see SmartIslandOverlayService), so the
+    // wide island's Y is decoupled from the idle punch-hole pill's Y and
+    // changing one slider can never displace the other.
     val wideYDelta = (settings.yOffset - settings.idleYOffset).dp
+    // FULL-BLEED WINDOW BASE: the content window covers the entire screen
+    // (window y = 0). It previously started at idleYOffset, so a precision
+    // yOffset SMALLER than idleYOffset pushed the collapsed pill above the
+    // window's top frame and the system clipped its top even though that
+    // screen strip was visible ("the top of it is cut even if it's not off
+    // screen"). Every render site below adds this base back, so on-screen
+    // positions are identical to the old window-at-idleYOffset geometry
+    // while the pill now has unlimited headroom above it.
+    val windowTopBase = settings.idleYOffset.dp
     val expandedTopOffset = (if (hasCompanion) {
         statusBarHeight.dp.coerceAtLeast(circleSize + compactGap)
     } else {
         statusBarHeight.dp
     }) + wideYDelta
     // PRECISION POSITION, NORMAL ISLAND (collapsed): the collapsed WIDE pill
-    // renders at window-y (idleYOffset) + this delta, so its final screen y IS
-    // the precision-tuning "vertical offset" (yOffset) itself — while the idle
-    // punch-hole pill stays at idleYOffset. Every island now follows its own
+    // renders at window-y (0) + windowTopBase (idleYOffset) + this delta, so
+    // its final screen y IS the precision-tuning "vertical offset" (yOffset)
+    // itself — while the idle punch-hole pill stays at idleYOffset. Every island now follows its own
     // sliders in every state (the "precision position is not working with the
     // normal island" report), and the window itself still never moves, so no
     // window-position transient can ghost the morph.
@@ -328,6 +331,19 @@ fun IslandOverlayView(
     }
     val radius by transition.animateDp(transitionSpec = { sizeSpec }, label = "islandRadius") {
         if (it) 34.dp else if (isHiding) 0.dp else settings.cornerRadius.dp
+    }
+    // IDLE SHADOW: the tiny cutout-sized idle pill floats on the wallpaper,
+    // where a 14dp elevation shadow reads as a dirty smudge on light
+    // backgrounds ("a little shadow that looks bad in lighter backgrounds").
+    // The idle pill now has NO shadow; the collapsed wide island keeps 14dp
+    // and the expanded card 22dp. Animated inside the same transition with
+    // the pill's own float spec so the shadow fades with the morph instead
+    // of popping when the last notification dismisses.
+    val pillShadowElevation by transition.animateFloat(
+        transitionSpec = { sizeSpecFloat },
+        label = "pillShadowElevation"
+    ) {
+        if (it) 22f else if (isIdle) 0f else 14f
     }
     val animatedXOffset by transition.animateDp(transitionSpec = { positionSpec }, label = "islandXOffset") {
         if (it) 0.dp else collapsedMainOffset
@@ -512,7 +528,11 @@ fun IslandOverlayView(
     // pill renders with — otherwise the precision-Y slider would leave the
     // bubbles floating at the idle band while the pill moves down.
     val collapsedGroupY by transition.animateDp(transitionSpec = { sizeSpec }, label = "collapsedGroupY") {
-        if (!it) collapsedWideYDelta else 0.dp
+        // Bubbles are siblings of the pill Box, so they carry the full
+        // window-local Y themselves: windowTopBase + the collapsed wide-Y
+        // delta when collapsed, windowTopBase when expanded (the old
+        // window-local 0 — the window no longer starts at idleYOffset).
+        if (!it) windowTopBase + collapsedWideYDelta else windowTopBase
     }
 
     // Tertiary bubble: always a circle, right of the secondary circle when collapsed;
@@ -554,10 +574,11 @@ fun IslandOverlayView(
                     .height(effectiveHeight.dp)
                     .graphicsLayer {
                         translationX = collapsedMainOffset.toPx()
-                        // The hidden pill also sits at the collapsed wide-Y
-                        // delta when notifications are present (auto-hide);
-                        // the reveal tap target must cover THAT band.
-                        translationY = collapsedWideYDelta.toPx()
+                        // The hidden pill also sits at windowTopBase + the
+                        // collapsed wide-Y delta when notifications are
+                        // present (auto-hide); the reveal tap target must
+                        // cover THAT band.
+                        translationY = windowTopBase.toPx() + collapsedWideYDelta.toPx()
                     }
                     .pointerInput(Unit) {
                         detectTapGestures {
@@ -586,14 +607,20 @@ fun IslandOverlayView(
                     // no-reflection devices (0 on reflection devices, where the
                     // in-Compose dragOffset owns the follow-the-finger).
                     translationX = animatedXOffset.toPx()
-                    translationY = yOffset.toPx() + dragOffset + pillDragOffsetPx
+                    // windowTopBase re-anchors every state to the full-bleed
+                    // window (y = 0): idle pill → idleYOffset, collapsed wide
+                    // island → idleYOffset + (yOffset - idleYOffset) = yOffset,
+                    // expanded card → idleYOffset + expandedTopOffset — the
+                    // exact screen positions the old window-at-idleYOffset
+                    // geometry produced, now without the top clipping.
+                    translationY = windowTopBase.toPx() + yOffset.toPx() + dragOffset + pillDragOffsetPx
                     scaleX = switchScaleAnim.value
                     scaleY = switchScaleAnim.value
                 }
                 .then(
                     if (settings.enableShadow && !isHiding) {
                         Modifier.shadow(
-                            elevation = if (currentExpanded) 22.dp else 14.dp,
+                            elevation = pillShadowElevation.dp,
                             shape = RoundedCornerShape(safeRadius),
                             clip = false,
                             ambientColor = Color.Black,

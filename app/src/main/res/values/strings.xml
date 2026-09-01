@@ -291,7 +291,9 @@
     <string name="toggle_show_lock_screen_title">Show Island on Lock Screen</string>
     <string name="toggle_show_lock_screen_desc">Keep Smart Island floating when device is locked</string>
     <string name="toggle_unread_lock_screen_title">Unread Notifications on Lock Screen</string>
-    <string name="toggle_unread_lock_screen_desc">While locked, unopened notifications stay in the system so the LOCK SCREEN itself shows them — the island-only hiding pauses while the keyguard is up and resumes at unlock. Stops messages that arrive while the screen is off from being missed entirely</string>
+    <string name="toggle_unread_lock_screen_desc">While locked, unopened notifications appear on the LOCK SCREEN itself — ones that arrive while locked stay in the system, ones that arrived earlier are mirrored there silently, and island-only hiding resumes at unlock. Stops messages from being missed entirely</string>
+    <string name="mirror_channel_name">Lock Screen Unread</string>
+    <string name="mirror_channel_desc">Silent mirrors that surface unread notifications on the lock screen while Smart Island hides them from the shade</string>
     <string name="privacy_level_title">Lock Screen Content Privacy Level</string>
     <string name="privacy_app_icon_only">App Icon Only (Private)</string>
     <string name="privacy_full_content">Full Content Preview</string>

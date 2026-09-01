@@ -90,6 +90,14 @@ class SmartIslandNotificationListenerService : NotificationListenerService() {
     // through that later listener-cancel via the suppression window armed
     // right before it fires.
     private val lockDeferredKeys = ConcurrentHashMap<String, Long>()
+    // LOCK-SCREEN MIRRORS: deferred cancels only help notifications that
+    // arrive WHILE the keyguard is up. Ones that arrived while unlocked were
+    // already cancelled from the system — nothing could ever resurface them
+    // on the lock screen. On screen-off, LockScreenMirrorNotifier re-posts
+    // those unread island notifications as silent SmartIsland notifications
+    // so the system lock screen presents them; unlock cancels the mirrors
+    // and restores the island-only model.
+    private val lockScreenMirror = LockScreenMirrorNotifier(this)
     private var userPresentReceiver: BroadcastReceiver? = null
     @Volatile private var currentSettings = SmartIslandSettings.Default
     private val coroutineExceptionHandler = CoroutineExceptionHandler { _, error ->
@@ -105,7 +113,8 @@ class SmartIslandNotificationListenerService : NotificationListenerService() {
 
     override fun onCreate() {
         super.onCreate()
-        registerUserPresentReceiver()
+        lockScreenMirror.ensureChannel()
+        registerLockStateReceivers()
         serviceScope.launch {
             runSuspendCatchingLogged(TAG, "Settings collector failed") {
                 repository.settings.collect { settings ->
@@ -118,11 +127,16 @@ class SmartIslandNotificationListenerService : NotificationListenerService() {
                     when {
                         // Island-only mode is off: the deferred system copies
                         // must simply stay in the shade where they are.
-                        !settings.enabled || !settings.hideFromNotificationShade ->
+                        !settings.enabled || !settings.hideFromNotificationShade -> {
                             lockDeferredKeys.clear()
+                            lockScreenMirror.cancelAllMirrors()
+                        }
                         // Feature switched off mid-lock: restore the old
                         // island-only behavior immediately.
-                        !settings.showUnreadOnLockScreen -> cancelLockDeferredKeys()
+                        !settings.showUnreadOnLockScreen -> {
+                            cancelLockDeferredKeys(force = true)
+                            lockScreenMirror.cancelAllMirrors()
+                        }
                         else -> Unit
                     }
                     if (settings.disabledNotificationPackages.isNotEmpty()) {
@@ -304,6 +318,7 @@ class SmartIslandNotificationListenerService : NotificationListenerService() {
                 // Removed by posting app, user, framework timeout, or after initial suppression window.
                 android.util.Log.d(TAG, "Genuinely removed, cleaning up: ${sbn.key}")
                 lockDeferredKeys.remove(sbn.key)
+                lockScreenMirror.cancelMirror(sbn.key)
                 clearSuppressed(sbn.key)
                 notificationRepository.removeNotification(sbn.key)
             }
@@ -336,6 +351,7 @@ class SmartIslandNotificationListenerService : NotificationListenerService() {
 
                 android.util.Log.d(TAG, "Removing from island repo: ${sbn.key}")
                 lockDeferredKeys.remove(sbn.key)
+                lockScreenMirror.cancelMirror(sbn.key)
                 clearSuppressed(sbn.key)
                 notificationRepository.removeNotification(sbn.key)
             }
@@ -359,9 +375,27 @@ class SmartIslandNotificationListenerService : NotificationListenerService() {
                     // Safety sweep: if this is a fresh bind (process restart,
                     // listener rebind) any stale deferred keys from a previous
                     // incarnation cannot exist (in-memory map), but a rebind
-                    // MID-SESSION can — execute their pending cancels if the
-                    // keyguard is down already.
+                    // MID-SESSION can — execute their pending cancels ONLY if
+                    // the keyguard is already down (unforced call).
                     cancelLockDeferredKeys()
+
+                    // Stale-mirror sweep: a previous incarnation may have
+                    // died while the screen was locked, leaving mirrors in
+                    // the shade. They are enumerated from the system's own
+                    // list (the in-memory set died with the process) and
+                    // only cleared when the keyguard is DOWN — while locked
+                    // the mirrors are still serving the lock screen.
+                    if (!isKeyguardCurrentlyLocked()) {
+                        lockScreenMirror.cancelAllMirrors()
+                        runCatchingLogged(TAG, "Failed to sweep stale lock-screen mirrors") {
+                            activeNotifications
+                                ?.filter {
+                                    it.packageName == packageName &&
+                                        it.tag?.startsWith(LockScreenMirrorNotifier.MIRROR_TAG_PREFIX) == true
+                                }
+                                ?.forEach { cancelNotification(it.key) }
+                        }
+                    }
 
                     val overlayReady = ensureOverlayServiceRunning()
                     val active = runCatchingLogged(TAG, "Failed to get active notifications") {
@@ -677,14 +711,6 @@ class SmartIslandNotificationListenerService : NotificationListenerService() {
         return true
     }
 
-    // Kept for tests
-    internal fun isHighPriorityNotification(sbn: StatusBarNotification, notification: Notification): Boolean {
-        val ranking = Ranking()
-        val rankingMap = currentRanking
-        val isHigh = rankingMap != null && rankingMap.getRanking(sbn.key, ranking) && ranking.importance >= android.app.NotificationManager.IMPORTANCE_HIGH
-        return isHigh || notification.fullScreenIntent != null
-    }
-
     /**
      * Suppress a notification from the system shade so it only appears in the island.
      *
@@ -762,9 +788,16 @@ class SmartIslandNotificationListenerService : NotificationListenerService() {
         // and the key must stay dismissed (see userDismissedKeys).
         markUserDismissed(key)
         lockDeferredKeys.remove(key)
+        lockScreenMirror.cancelMirror(key)
         clearSuppressed(key)
         runCatchingLogged(TAG, "forceCancel failed") { cancelNotification(key) }
         notificationRepository.removeNotification(key)
+    }
+
+    private fun isKeyguardCurrentlyLocked(): Boolean {
+        val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
+            ?: return false
+        return runCatching { keyguardManager.isKeyguardLocked }.getOrDefault(false)
     }
 
     /**
@@ -776,9 +809,7 @@ class SmartIslandNotificationListenerService : NotificationListenerService() {
      */
     private fun shouldDeferCancelWhileLocked(): Boolean {
         if (!currentSettings.showUnreadOnLockScreen) return false
-        val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
-            ?: return false
-        return runCatching { keyguardManager.isKeyguardLocked }.getOrDefault(false)
+        return isKeyguardCurrentlyLocked()
     }
 
     /**
@@ -788,40 +819,44 @@ class SmartIslandNotificationListenerService : NotificationListenerService() {
      * it (keeping it inside the REASON_LISTENER_CANCEL keep-alive window).
      */
     private fun deferCancelWhileLocked(key: String) {
+        // If a mirror for this key is live (it was cancelled before lock and
+        // mirrored at screen-off), the ORIGINAL is now present natively on
+        // the lock screen — drop the mirror so the message is not shown
+        // twice (deferred original + stale mirror).
+        lockScreenMirror.cancelMirror(key)
         lockDeferredKeys[key] = SystemClock.elapsedRealtime()
         cleanupLockDeferredKeys()
     }
 
     private fun cleanupLockDeferredKeys(now: Long = SystemClock.elapsedRealtime()) {
-        val cutoff = now - LOCK_DEFERRED_TTL_MS
-        lockDeferredKeys.entries.forEach { entry ->
-            if (entry.value < cutoff) {
-                lockDeferredKeys.remove(entry.key, entry.value)
-            }
-        }
-        val overflow = lockDeferredKeys.size - MAX_LOCK_DEFERRED_KEYS
-        if (overflow > 0) {
-            lockDeferredKeys.entries
-                .sortedBy { it.value }
-                .take(overflow)
-                .forEach { lockDeferredKeys.remove(it.key, it.value) }
-        }
+        sweepBoundedMap(lockDeferredKeys, LOCK_DEFERRED_TTL_MS, MAX_LOCK_DEFERRED_KEYS, now)
     }
 
     /**
      * Executes the deferred island-only cancels. Runs on unlock
-     * (ACTION_USER_PRESENT), when the setting is switched off mid-lock, and
-     * as a safety sweep on listener (re)connect. After this sweep the
-     * island-only model is restored: the shade copies are gone, the island
-     * keeps (or re-gains) its pills.
+     * (ACTION_USER_PRESENT, forced), when the setting is switched off
+     * mid-lock (forced), and as a safety sweep on listener (re)connect
+     * (unforced — see below). After this sweep the island-only model is
+     * restored: the shade copies are gone, the island keeps (or re-gains)
+     * its pills.
+     *
+     * [force] bypasses the keyguard check. The UNFORCED path must never
+     * cancel while the keyguard is up: onListenerConnected used to call
+     * this unconditionally, so EVERY listener rebind while locked (process
+     * death, battery throttling, OEM job scheduling) executed the pending
+     * cancels and wiped the notifications off the lock screen — the
+     * recurring "they never appear on the lock screen" failure. The
+     * per-notification re-suppress loop below re-defers anything still
+     * active, but the just-cancelled keys were already gone by then.
      */
-    private fun cancelLockDeferredKeys() {
+    private fun cancelLockDeferredKeys(force: Boolean = false) {
         if (lockDeferredKeys.isEmpty()) return
         if (!currentSettings.enabled || !currentSettings.hideFromNotificationShade) {
             // Island-only mode is off: the system copies must simply stay.
             lockDeferredKeys.clear()
             return
         }
+        if (!force && isKeyguardCurrentlyLocked()) return
         val keys = lockDeferredKeys.keys.toList()
         lockDeferredKeys.clear()
         val activeKeys = runCatchingLogged(TAG, "Failed to list active notifications for unlock sweep") {
@@ -842,24 +877,62 @@ class SmartIslandNotificationListenerService : NotificationListenerService() {
         }
     }
 
-    private fun registerUserPresentReceiver() {
+    private fun registerLockStateReceivers() {
         if (userPresentReceiver != null) return
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context, intent: Intent) {
-                if (intent.action == Intent.ACTION_USER_PRESENT) {
-                    cancelLockDeferredKeys()
+                when (intent.action) {
+                    Intent.ACTION_USER_PRESENT -> {
+                        cancelLockDeferredKeys(force = true)
+                        lockScreenMirror.cancelAllMirrors()
+                    }
+                    // SCREEN OFF → the lock screen is about to become the
+                    // only surface; mirror every unread island notification
+                    // whose system copy is gone so the lock screen presents
+                    // it natively. Both actions are PROTECTED system
+                    // broadcasts — only the system can send them — so an
+                    // EXPORTED registration is spoof-safe AND delivery-safe
+                    // (a NOT_EXPORTED receiver depends on platform-side
+                    // system-exemption behavior that has been flaky on some
+                    // OEM builds).
+                    Intent.ACTION_SCREEN_OFF -> postLockScreenMirrors()
                 }
             }
         }
-        runCatchingLogged(TAG, "Failed to register USER_PRESENT receiver") {
+        runCatchingLogged(TAG, "Failed to register lock-state receivers") {
             ContextCompat.registerReceiver(
                 this,
                 receiver,
-                IntentFilter(Intent.ACTION_USER_PRESENT),
-                ContextCompat.RECEIVER_NOT_EXPORTED
+                IntentFilter(Intent.ACTION_USER_PRESENT).apply {
+                    addAction(Intent.ACTION_SCREEN_OFF)
+                },
+                ContextCompat.RECEIVER_EXPORTED
             )
             userPresentReceiver = receiver
         }
+    }
+
+    /**
+     * Mirrors every unread island notification that lost its system copy so
+     * the lock screen shows it. Called on SCREEN OFF; the originals stay
+     * deferred (never cancelled while locked), so nothing that arrived
+     * WHILE locked is duplicated here — only pre-lock cancellations are
+     * mirrored back into existence.
+     */
+    private fun postLockScreenMirrors() {
+        val settings = currentSettings
+        if (!settings.enabled || !settings.hideFromNotificationShade || !settings.showUnreadOnLockScreen) {
+            lockScreenMirror.cancelAllMirrors()
+            return
+        }
+        val activeKeys = runCatchingLogged(TAG, "Failed to list active notifications for mirror sweep") {
+            activeNotifications?.map { it.key }?.toSet()
+        }.orEmpty()
+        val candidates = notificationRepository.notifications.value.filter { island ->
+            island.mode in LockScreenMirrorNotifier.MIRROR_MODES && island.key !in activeKeys
+        }
+        if (candidates.isEmpty()) return
+        lockScreenMirror.postMirrors(candidates)
     }
 
     private fun markUserDismissed(key: String) {
@@ -873,19 +946,7 @@ class SmartIslandNotificationListenerService : NotificationListenerService() {
     }
 
     private fun cleanupUserDismissedKeys(now: Long = SystemClock.elapsedRealtime()) {
-        val cutoff = now - USER_DISMISS_TOMBSTONE_TTL_MS
-        userDismissedKeys.entries.forEach { entry ->
-            if (entry.value < cutoff) {
-                userDismissedKeys.remove(entry.key, entry.value)
-            }
-        }
-        val overflow = userDismissedKeys.size - MAX_USER_DISMISSED_KEYS
-        if (overflow > 0) {
-            userDismissedKeys.entries
-                .sortedBy { it.value }
-                .take(overflow)
-                .forEach { userDismissedKeys.remove(it.key, it.value) }
-        }
+        sweepBoundedMap(userDismissedKeys, USER_DISMISS_TOMBSTONE_TTL_MS, MAX_USER_DISMISSED_KEYS, now)
     }
 
     private fun playNotificationSound(sbn: StatusBarNotification) {
@@ -968,30 +1029,40 @@ class SmartIslandNotificationListenerService : NotificationListenerService() {
         cleanupSuppressedKeys(now)
     }
 
-    private fun isSuppressed(key: String): Boolean {
-        cleanupSuppressedKeys()
-        return suppressedKeys.containsKey(key)
-    }
-
     private fun clearSuppressed(key: String) {
         pendingSuppressionJobs.remove(key)?.cancel()
         suppressedKeys.remove(key)
     }
 
-    private fun cleanupSuppressedKeys(now: Long = SystemClock.elapsedRealtime()) {
-        val cutoff = now - SUPPRESSED_KEY_TTL_MS
-        suppressedKeys.entries.forEach { entry ->
+    /**
+     * Shared TTL + size bound for the listener's key bookkeeping maps.
+     * Entries older than [ttlMs] are dropped, then the oldest entries are
+     * evicted down to [maxEntries] (bounds pathological growth). Previously
+     * this identical sweep logic existed in three copies — one per map.
+     */
+    private fun sweepBoundedMap(
+        map: ConcurrentHashMap<String, Long>,
+        ttlMs: Long,
+        maxEntries: Int,
+        now: Long = SystemClock.elapsedRealtime()
+    ) {
+        val cutoff = now - ttlMs
+        map.entries.forEach { entry ->
             if (entry.value < cutoff) {
-                suppressedKeys.remove(entry.key, entry.value)
+                map.remove(entry.key, entry.value)
             }
         }
-        val overflow = suppressedKeys.size - MAX_SUPPRESSED_KEYS
+        val overflow = map.size - maxEntries
         if (overflow > 0) {
-            suppressedKeys.entries
+            map.entries
                 .sortedBy { it.value }
                 .take(overflow)
-                .forEach { suppressedKeys.remove(it.key, it.value) }
+                .forEach { map.remove(it.key, it.value) }
         }
+    }
+
+    private fun cleanupSuppressedKeys(now: Long = SystemClock.elapsedRealtime()) {
+        sweepBoundedMap(suppressedKeys, SUPPRESSED_KEY_TTL_MS, MAX_SUPPRESSED_KEYS, now)
     }
 
     private val iconCache = android.util.LruCache<String, Bitmap>(50)

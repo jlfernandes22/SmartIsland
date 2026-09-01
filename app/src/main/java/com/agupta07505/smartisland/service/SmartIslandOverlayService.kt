@@ -694,13 +694,14 @@ class SmartIslandOverlayService : AccessibilityService() {
                         val maxMainLeftPx = (screenWidth - groupWidthPx - edgePaddingPx)
                             .coerceAtLeast(edgePaddingPx)
                         val mainLeftPx = desiredMainLeftPx.coerceIn(edgePaddingPx, maxMainLeftPx)
-                        // The collapsed WIDE pill renders at window-y +
-                        // (yOffset - idleYOffset) — the precision "vertical
-                        // offset" (IslandOverlayView collapsedWideYDelta); the
-                        // idle pill renders at window-y. The region is
-                        // window-local, so the delta shifts the band's top.
-                        val topPx = (if (notificationsCount == 0) 0f
-                            else settingsVal.yOffset - settingsVal.idleYOffset) * density
+                        // The collapsed WIDE pill renders at idleYOffset +
+                        // (yOffset - idleYOffset) = yOffset on SCREEN; the
+                        // idle pill renders at idleYOffset. The window now
+                        // sits at y = 0 (see updateWindowLayoutParams), so
+                        // the window-local region top IS the pill's screen-y
+                        // (IslandOverlayView windowTopBase + delta).
+                        val topPx = (if (notificationsCount == 0) settingsVal.idleYOffset
+                            else settingsVal.yOffset) * density
                         val left = (mainLeftPx - touchPaddingPx).toInt()
                         val top = topPx.toInt()
                         val right = (mainLeftPx + groupWidthPx + touchPaddingPx).toInt()
@@ -828,14 +829,19 @@ class SmartIslandOverlayService : AccessibilityService() {
             WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED or
             (if (contentUntouchable) WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE else 0)
 
-        // WINDOW-Y DECOUPLING: the overlay window always sits at the IDLE
-        // pill's y (settings.idleYOffset). The wide island's yOffset is applied
-        // INSIDE Compose (IslandOverlayView adds yOffset - idleYOffset to the
-        // expanded card's top offset), so the window itself NEVER moves — the
-        // precision-tuning "wide island Y" slider can no longer drag the idle
-        // punch-hole pill with it, and no window position transient can ghost
-        // or snap the morph either.
-        val currentY = settings.idleYOffset.dpToPx()
+        // WINDOW-Y DECOUPLING + FULL-BLEED TOP: the window sits at y = 0 and
+        // covers the ENTIRE screen in every state. The idle pill's y
+        // (settings.idleYOffset) and the wide island's yOffset are applied
+        // INSIDE Compose (IslandOverlayView adds them to every render site),
+        // so the window itself NEVER moves — the precision-tuning sliders
+        // can never drag the other island with them, and no window-position
+        // transient can ghost or snap the morph. y = 0 (instead of the old
+        // y = idleYOffset) gives the pill unlimited headroom: a precision
+        // yOffset smaller than idleYOffset used to poke the collapsed pill
+        // above the window frame, so the system clipped its top even while
+        // that screen strip was visible ("the top of it is cut even if it's
+        // not off screen").
+        val currentY = 0
         val currentSoftInputMode = if (isInput) {
             WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE or
                 WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE
@@ -1348,9 +1354,11 @@ class SmartIslandOverlayService : AccessibilityService() {
             gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
             // WINDOW CENTERING INVARIANT: x = 0 in every window state.
             x = 0
-            // Window always sits at the IDLE pill y (see updateWindowLayoutParams):
-            // the wide island's yOffset is applied inside Compose instead.
-            y = settings.idleYOffset.dpToPx()
+            // FULL-BLEED TOP: y = 0 in every window state (see
+            // updateWindowLayoutParams); idleYOffset/yOffset are applied
+            // inside Compose instead, so the pill can never be clipped by
+            // the window frame.
+            y = 0
         }.also {
             lastParams = it
         }
