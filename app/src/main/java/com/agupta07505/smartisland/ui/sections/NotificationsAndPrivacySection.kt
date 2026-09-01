@@ -295,6 +295,20 @@ fun NotificationsAndPrivacySection(
                     onCheckedChange = { scope.launch { repository.setShowOnLockScreen(it) } }
                 )
 
+                // Unread-on-lock-screen: the "missed it everywhere" fix. With
+                // island-only notifications (hide from shade on) a messaging
+                // notification that arrives while the screen is off used to be
+                // invisible until unlock; this keeps the island on the lock
+                // screen whenever unopened notifications are waiting.
+                ToggleRowItem(
+                    title = stringResource(R.string.toggle_unread_lock_screen_title),
+                    subtitle = stringResource(R.string.toggle_unread_lock_screen_desc),
+                    icon = Icons.Rounded.NotificationsActive,
+                    iconColor = Color(0xFF8B5CF6),
+                    checked = settings.showUnreadOnLockScreen,
+                    onCheckedChange = { scope.launch { repository.setShowUnreadOnLockScreen(it) } }
+                )
+
                 if (settings.showOnLockScreen) {
                     Column(
                         modifier = Modifier

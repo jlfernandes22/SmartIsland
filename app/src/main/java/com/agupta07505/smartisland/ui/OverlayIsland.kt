@@ -36,9 +36,12 @@ fun OverlayIsland(
     val selectedIndex by viewModel.selectedIndex.collectAsState()
     val isLocked by viewModel.isLocked.collectAsState()
     val isInputActive by viewModel.isInputActive.collectAsState()
-    val windowResizeMask by viewModel.windowResizeMask.collectAsState()
     val menuFeedback by viewModel.menuFeedback.collectAsState()
     val reappearTick by viewModel.reappearTick.collectAsState()
+    // Collapsed-pill bridge for the service's touch-catcher window (used on
+    // devices without the touchableRegion reflection — see PillTouchHandlerView).
+    val pillDragOffsetPx by viewModel.pillDragOffsetPx.collectAsState()
+    val pillRevealTick by viewModel.pillRevealTick.collectAsState()
     val context = LocalContext.current
 
     val isContentRedacted = isLocked && settings.lockScreenPrivacy == "AppIconOnly"
@@ -97,11 +100,13 @@ fun OverlayIsland(
         onOpenFloatingWindow = onOpenFloatingWindow,
         statusBarHeight = statusBarHeight,
         isInputActive = isInputActive,
-        windowResizeMask = windowResizeMask,
         onReplyStateChanged = { viewModel.setInputActive(it) },
         onOpenIdleInfoItem = onOpenIdleInfoItem,
         menuFeedback = menuFeedback,
         reappearTick = reappearTick,
+        pillDragOffsetPx = pillDragOffsetPx,
+        pillRevealTick = pillRevealTick,
+        onPillUiHiddenChanged = { viewModel.isPillUiHidden.value = it },
         modifier = modifier
     )
 }

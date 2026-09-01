@@ -97,16 +97,25 @@ fun IslandOverlayView(
     statusBarHeight: Float,
     modifier: Modifier = Modifier,
     isInputActive: Boolean = false,
-    // True while the service is resizing the overlay window on devices without
-    // the touchableRegion reflection: draw a fully transparent buffer so the
-    // resize's stale-buffer stretch (the "ghost island" the user saw at the
-    // top corners / duplicated pill on collapse) has nothing to show.
-    windowResizeMask: Boolean = false,
     onReplyStateChanged: (Boolean) -> Unit = {},
     onDismissAllNotifications: () -> Unit = {},
     onOpenIdleInfoItem: (String) -> Unit = {},
     menuFeedback: String? = null,
-    reappearTick: Int = 0
+    reappearTick: Int = 0,
+    // Live vertical drag offset (px) streamed by the service's pill
+    // touch-catcher window on devices WITHOUT the touchableRegion reflection
+    // (the content window is FLAG_NOT_TOUCHABLE while collapsed there, so
+    // this composable never sees the gesture itself). Added to the pill's
+    // translationY so the collapsed pill follows the finger exactly like the
+    // in-Compose dragOffset does on reflection-capable devices.
+    pillDragOffsetPx: Float = 0f,
+    // Incremented when the pill touch-catcher reports a tap on the (possibly
+    // hidden) collapsed pill: the auto-hidden pill awakens, the idle-hidden
+    // one toggles — the exact logic of the in-Compose hidden-pill tap target.
+    pillRevealTick: Int = 0,
+    // Writes the Compose-side isHiding state back to the service so the
+    // touch-catcher knows when only reveal-taps should fire.
+    onPillUiHiddenChanged: (Boolean) -> Unit = {}
 ) {
     // Fix #1: rememberUpdatedState ensures the lambda is always fresh
     // even though pointerInput(Unit) never restarts its coroutine
@@ -392,6 +401,29 @@ fun IslandOverlayView(
         }
     }
 
+    // Touch-catcher reveal taps: while the pill is UI-hidden (auto-hide or
+    // hide-when-idle) a tap must awaken it (auto-hide) or toggle the island
+    // (idle hide) — the same decision the in-Compose hidden tap target makes.
+    // The catcher cannot read Compose state, so it just asks; the state lives
+    // here.
+    LaunchedEffect(pillRevealTick) {
+        if (pillRevealTick > 0) {
+            if (settings.autoHidePill && isAutoHidden) {
+                isAutoHidden = false
+                userInteractionTimestamp = System.currentTimeMillis()
+            } else {
+                currentOnToggle()
+            }
+        }
+    }
+
+    // Keep the service's touch-catcher in sync with the Compose-side hiding
+    // state: while hidden the catcher must only forward reveal-taps.
+    val currentOnPillUiHidden by rememberUpdatedState(onPillUiHiddenChanged)
+    LaunchedEffect(isHiding) {
+        currentOnPillUiHidden(isHiding)
+    }
+
     // Dual Pill (Multi-Tasking Split Island) Detection:
     // When 2 or more notifications exist (e.g. Music + Notification/Timer/Call), split into Main Pill + Secondary Bubble
     val secondaryNotification = if (notifications.size >= 2) {
@@ -490,12 +522,7 @@ fun IslandOverlayView(
     }
 
     Box(
-        modifier = outerModifier.graphicsLayer {
-            // Window-resize ghost mask: see IslandViewModel.windowResizeMask.
-            // A plain boolean read here recomposes nothing — graphicsLayer's
-            // lambda re-runs per value change without relayout.
-            alpha = if (windowResizeMask) 0f else 1f
-        },
+        modifier = outerModifier,
         contentAlignment = Alignment.TopCenter
     ) {
 
@@ -531,8 +558,11 @@ fun IslandOverlayView(
                 .graphicsLayer {
                     // Screen-anchored target; the window is always centered so
                     // renderedX = screenCenter + xOffset in every window state.
+                    // pillDragOffsetPx carries the touch-catcher's drag on
+                    // no-reflection devices (0 on reflection devices, where the
+                    // in-Compose dragOffset owns the follow-the-finger).
                     translationX = animatedXOffset.toPx()
-                    translationY = yOffset.toPx() + dragOffset
+                    translationY = yOffset.toPx() + dragOffset + pillDragOffsetPx
                     scaleX = switchScaleAnim.value
                     scaleY = switchScaleAnim.value
                 }

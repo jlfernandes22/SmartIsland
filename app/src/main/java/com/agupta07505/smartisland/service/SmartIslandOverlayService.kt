@@ -20,6 +20,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.graphics.PixelFormat
+import android.graphics.RectF
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
@@ -56,9 +57,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlinx.coroutines.withTimeoutOrNull
-import kotlin.coroutines.resume
 
 import javax.inject.Inject
 
@@ -85,6 +83,15 @@ class SmartIslandOverlayService : AccessibilityService() {
     @Volatile private var suppressShadeHide: Boolean = false
     private var collapseJob: kotlinx.coroutines.Job? = null
     private var lastParams: WindowManager.LayoutParams? = null
+    // TWO-WINDOW ARCHITECTURE (no-reflection devices): the content window
+    // above is MATCH_PARENT in every state and NEVER resizes; while collapsed
+    // it is FLAG_NOT_TOUCHABLE and this separate, fully transparent window
+    // carries the collapsed-pill gestures instead. Because the catcher has no
+    // visible content, its add/remove/resize can never produce a ghost or a
+    // blink — which is what kills the end-of-collapse flash for good.
+    private var pillTouchView: PillTouchHandlerView? = null
+    private var pillTouchParams: WindowManager.LayoutParams? = null
+    private var pillDragAnimJob: kotlinx.coroutines.Job? = null
     // WINDOW CENTERING INVARIANT: every window this service attaches is
     // horizontally centered (x = 0) in every state — expanded, collapsed, and
     // narrow-fallback alike. The collapsed content is screen-anchored (all
@@ -380,7 +387,12 @@ class SmartIslandOverlayService : AccessibilityService() {
                     collapseJob?.cancel()
                     if (expanded) {
                         isWindowExpanded = true
-                        resizeWindowMasked(expanded = true)
+                        // Two-window architecture: expanding only flips the
+                        // content window's touch flags and removes the (always
+                        // transparent) pill touch-catcher. The window frame
+                        // itself never changes size, so there is nothing to
+                        // mask and nothing that can ghost.
+                        updateWindowLayoutParams(true, viewModel.settings.value)
                         // Pre-bind the Shizuku user service while the menu is
                         // opening so the first hotspot tap dispatches
                         // immediately instead of paying the cold-start bind
@@ -397,7 +409,11 @@ class SmartIslandOverlayService : AccessibilityService() {
                         collapseJob = serviceScope.launch {
                             kotlinx.coroutines.delay(AUTO_COLLAPSE_DELAY_MS)
                             isWindowExpanded = false
-                            resizeWindowMasked(expanded = false)
+                            // Same flag-only swap, delayed until the collapse
+                            // springs are visually settled: the morph plays out
+                            // entirely inside the stable full-screen window and
+                            // the touch handover afterwards is invisible.
+                            updateWindowLayoutParams(false, viewModel.settings.value)
                         }
                     }
                 }
@@ -458,6 +474,10 @@ class SmartIslandOverlayService : AccessibilityService() {
             ) {
                 ensureForegroundStarted()
                 ensureCollapsedWindow()
+                // The window (re)creation above must be followed by the full
+                // window sync or a recreated collapsed state would be left
+                // without its pill touch-catcher (untouchable pill).
+                updateWindowLayoutParams(isWindowExpanded, viewModel.settings.value)
             }
         }
     }
@@ -547,7 +567,16 @@ class SmartIslandOverlayService : AccessibilityService() {
                 val isLocked = keyguardManager?.isKeyguardLocked == true
                 isLockScreenActive = isLocked
                 val isLandscape = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
-                val isHidden = (!viewModel.settings.value.showOnLockScreen && isLocked) ||
+                // LOCK SCREEN UNREAD: even when the island is hidden on the
+                // lock screen, unopened notifications must still surface there
+                // — with hideFromNotificationShade on they were cancelled from
+                // the shade, so otherwise they are invisible EVERYWHERE until
+                // unlock (the "they don't appear in the lock screen either"
+                // report).
+                val unreadOnLockScreen = viewModel.settings.value.showUnreadOnLockScreen &&
+                    isLocked &&
+                    viewModel.notifications.value.isNotEmpty()
+                val isHidden = (!viewModel.settings.value.showOnLockScreen && isLocked && !unreadOnLockScreen) ||
                     (isLandscape && !viewModel.settings.value.showInLandscape) ||
                     (viewModel.settings.value.hideWhenShadeOpen && isShadeOpen && !suppressShadeHide)
                 visibility = if (isHidden) android.view.View.GONE else android.view.View.VISIBLE
@@ -685,22 +714,17 @@ class SmartIslandOverlayService : AccessibilityService() {
                     addListenerMethod.invoke(observer, proxyListener)
                     isTouchableRegionSupported = true
                     android.util.Log.d(TAG, "OnComputeInternalInsetsListener successfully registered on live ViewTreeObserver")
-                    if (::viewModel.isInitialized && !isWindowExpanded) {
-                        // Post-boot window normalization (the initial window is
-                        // created before we know whether the reflection works,
-                        // so it is narrow; once the listener is alive the
-                        // touchableRegion class goes full-screen in both axes).
-                        // Routed through the masked resize so the one-time
-                        // narrow→full transition cannot ghost either.
+                    if (::viewModel.isInitialized) {
+                        // The insets listener just came alive (reflection
+                        // class): the content window must drop its collapsed
+                        // FLAG_NOT_TOUCHABLE and the pill touch-catcher window
+                        // is no longer needed. Re-run the window sync — on
+                        // this device class the window frame itself never
+                        // changes size (MATCH_PARENT in every state), so this
+                        // is a pure invisible flag/child-window swap.
                         serviceScope.launch {
-                            runSuspendCatchingLogged(TAG, "Masked window normalization failed") {
-                                // forceMask: even on the touchableRegion class
-                                // THIS resize is real (the initial window was
-                                // created narrow before the reflection could be
-                                // probed) — the steady-state short-circuit only
-                                // applies to expand/collapse, which no longer
-                                // resize anything on that class.
-                                resizeWindowMasked(expanded = false, forceMask = true)
+                            runSuspendCatchingLogged(TAG, "TouchableRegion window sync failed") {
+                                updateWindowLayoutParams(isWindowExpanded, viewModel.settings.value)
                             }
                         }
                     }
@@ -732,15 +756,23 @@ class SmartIslandOverlayService : AccessibilityService() {
     private fun updateWindowLayoutParams(expanded: Boolean, settings: SmartIslandSettings) {
         if (destroyed || !::windowManager.isInitialized || !::viewModel.isInitialized) return
         val view = islandView ?: return
-        val density = resources.displayMetrics.density
-        
+
         val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
         val isLocked = keyguardManager?.isKeyguardLocked == true
         isLockScreenActive = isLocked
         viewModel.isLocked.value = isLocked
         
         val isLandscape = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
-        val isHidden = (!settings.showOnLockScreen && isLocked) ||
+        // LOCK SCREEN UNREAD: even when the island is hidden on the lock
+        // screen, unopened notifications must still surface there — with
+        // hideFromNotificationShade on they were cancelled from the shade, so
+        // otherwise they are invisible EVERYWHERE until unlock (the "they
+        // don't appear in the lock screen either" report).
+        val notificationCount = viewModel.notifications.value.size
+        val unreadOnLockScreen = settings.showUnreadOnLockScreen &&
+            isLocked &&
+            notificationCount > 0
+        val isHidden = (!settings.showOnLockScreen && isLocked && !unreadOnLockScreen) ||
             (isLandscape && !settings.showInLandscape) ||
             (settings.hideWhenShadeOpen && isShadeOpen && !suppressShadeHide)
 
@@ -758,60 +790,32 @@ class SmartIslandOverlayService : AccessibilityService() {
             view.visibility = targetVisibility
         }
 
-        val notificationCount = viewModel.notifications.value.size
-        // Collapsed group extent = main pill + one gap+circle per companion
-        // bubble. 3+ notifications also draw a tertiary circle, so the narrow
-        // window must cover a second gap+circle or it clips that bubble (mirrors
-        // companionGroupWidth in IslandOverlayView).
-        val collapsedWidthPx = collapsedWindowWidthPx(settings, notificationCount, density)
-
-        // ORIGINAL upstream window mechanics (github.com/agupta07505/SmartIsland):
-        // the EXPANDED window is always MATCH_PARENT in both axes, and the
-        // collapsed window is the narrow content-sized one. The earlier fork
-        // experiment sized the expanded window to the reported card content
-        // (touch passthrough on devices where the touchableRegion reflection
-        // is blocked), but that made the collapse a WINDOW resize
-        // (content-sized → narrow) mid-morph — the surface relayout transient
-        // rendered the pill AND companion bubbles displaced LEFT for a few
-        // frames, gliding back as the resize animation finished. With the
-        // full-screen expanded window the whole collapse morph is pure
-        // Compose inside one stable window (identical to the original's
-        // animation path), and the single 220ms resize only swaps the clip
-        // bounds after the springs are past the visible-motion phase.
-        //
-        // RESIZE GHOST (device-tested 2026-09): any frame-size change makes
-        // SurfaceFlinger stretch the LAST submitted buffer into the new
-        // window bounds until the app's first frame at the new size arrives.
-        // The user saw exactly that: streaks at the top left/right corners
-        // on expand (the short collapsed strip stretched across the screen)
-        // and a squashed "duplicate island" right after the collapse morph.
-        // So on devices WHERE the touchableRegion reflection works the window
-        // is now MATCH_PARENT in BOTH axes in EVERY state — expand/collapse
-        // never resizes anything, and the ghost class is structurally gone
-        // (touch passthrough is unaffected: the region listener still
-        // restricts touches to the pill group). Devices WITHOUT the
-        // reflection must keep the narrow collapsed window (it IS their touch
-        // containment), so their resizes go through [resizeWindowMasked]
-        // which draws the buffer transparent across the transition instead.
-        val alwaysFullScreen = isTouchableRegionSupported
-        val h = if (expanded || alwaysFullScreen) {
-            WindowManager.LayoutParams.MATCH_PARENT
-        } else {
-            ((settings.height + 16f) * density).toInt()
-        }
-        val w = if (expanded || alwaysFullScreen) {
-            WindowManager.LayoutParams.MATCH_PARENT
-        } else {
-            collapsedWidthPx
-        }
+        // TWO-WINDOW ARCHITECTURE: the content window is MATCH_PARENT in BOTH
+        // axes in EVERY state on EVERY device class — the exact frame the
+        // original upstream uses while expanded, now permanent. Expand and
+        // collapse therefore NEVER resize this window: there is no surface
+        // relayout transient to ghost (the "duplicate island") and nothing to
+        // mask (the end-of-collapse blink). Touch containment is solved per
+        // device class instead:
+        //  - WITH the touchableRegion reflection: the insets listener
+        //    restricts touches to the pill group (unchanged).
+        //  - WITHOUT it: while collapsed the window carries
+        //    FLAG_NOT_TOUCHABLE and a separate fully transparent pill
+        //    touch-catcher window owns the collapsed gestures (see
+        //    syncPillTouchWindow). The catcher has no visible content, so its
+        //    add/remove/resize can never produce a visible artifact.
+        val h = WindowManager.LayoutParams.MATCH_PARENT
+        val w = WindowManager.LayoutParams.MATCH_PARENT
         val isInput = viewModel.isInputActive.value && expanded
+        val contentUntouchable = suppressShadeHide ||
+            (!isTouchableRegionSupported && !expanded)
         val focusFlags = if (isInput) 0 else WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
         val currentFlags = focusFlags or
             WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
             WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
             WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
             WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED or
-            (if (suppressShadeHide) WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE else 0)
+            (if (contentUntouchable) WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE else 0)
 
         // WINDOW-Y DECOUPLING: the overlay window always sits at the IDLE
         // pill's y (settings.idleYOffset). The wide island's yOffset is applied
@@ -829,6 +833,11 @@ class SmartIslandOverlayService : AccessibilityService() {
         }
 
         val currentX = 0
+        // The pill touch-catcher must be synced on EVERY call (its bounds
+        // depend on the notification count, which can change while the content
+        // window's params stay identical) — so it runs BEFORE the dedup
+        // early-return below.
+        syncPillTouchWindow(expanded, settings, isHidden)
         val lp = lastParams
         if (lp != null &&
             lp.width == w &&
@@ -860,80 +869,379 @@ class SmartIslandOverlayService : AccessibilityService() {
     }
 
     /**
-     * Window resize with the ghost masked out (devices WITHOUT the
-     * touchableRegion reflection — those still need the narrow collapsed
-     * window, and any frame-size change would otherwise stretch the last
-     * buffer into the new bounds: the "duplicate island" the user reported).
-     *
-     * Sequence: raise the Compose-side mask (the overlay draws a fully
-     * transparent buffer) → wait for that buffer to be presented → resize →
-     * wait for the first layout at the new size → drop the mask. The
-     * stretched frames are all transparent, so nothing wrong ever becomes
-     * visible; the cost is a ~60-80ms window in which the island is invisible
-     * (a blink at the morph's edge, far less noticeable than the ghost).
-     *
-     * Cancellation-safe: collectLatest cancels this on rapid toggles, and the
-     * finally-block releases the mask so the island can never stay hidden.
+     * Keeps the pill TOUCH-CATCHER window in sync (devices WITHOUT the
+     * touchableRegion reflection). The catcher exists exactly while
+     *  - the island is collapsed,
+     *  - the content window is visible,
+     *  - the shade-hide suppression is off, and
+     *  - the insets reflection is unavailable.
+     * It is a fully transparent window sized over the collapsed pill group
+     * (the exact footprint of the old narrow window), so all of its
+     * add/remove/resize operations are invisible by construction — the
+     * structural replacement for the masked resize (and its end-of-collapse
+     * blink) that this class previously needed.
      */
-    private suspend fun resizeWindowMasked(expanded: Boolean, forceMask: Boolean = false) {
-        if ((!forceMask && isTouchableRegionSupported) || islandView == null) {
-            // Full-screen in every state: updateWindowLayoutParams is a no-op
-            // (params already match) and there is no resize to mask.
-            updateWindowLayoutParams(expanded, viewModel.settings.value)
+    private fun syncPillTouchWindow(
+        expanded: Boolean,
+        settings: SmartIslandSettings,
+        contentHidden: Boolean
+    ) {
+        if (destroyed || !::windowManager.isInitialized || !::viewModel.isInitialized) return
+        if (islandView == null) {
+            // No content window: a catcher alone would be an invisible touch
+            // sink over the pill area.
+            removePillTouchWindow()
             return
         }
-        viewModel.windowResizeMask.value = true
-        try {
-            // Let at least one frame render with the transparent buffer BEFORE
-            // the resize: 40ms covers two 60Hz vsync periods (and several more
-            // at 90/120Hz), so SurfaceFlinger has the empty buffer in hand.
-            delay(WINDOW_MASK_SETTLE_MS)
-            updateWindowLayoutParams(expanded, viewModel.settings.value)
-            awaitNextLayoutOrTimeout()
-        } finally {
-            viewModel.windowResizeMask.value = false
+        val needed = !expanded &&
+            !contentHidden &&
+            !suppressShadeHide &&
+            !isTouchableRegionSupported
+        if (!needed) {
+            removePillTouchWindow()
+            return
+        }
+
+        val density = resources.displayMetrics.density
+        val notificationCount = viewModel.notifications.value.size
+        val widthPx = collapsedWindowWidthPx(settings, notificationCount, density)
+        val heightPx = ((settings.height + 16f) * density).toInt()
+        val yPx = settings.idleYOffset.dpToPx()
+        val existing = pillTouchView
+        if (existing == null) {
+            val view = PillTouchHandlerView(this).apply {
+                listener = pillTouchListener
+                holdThresholdMs = PILL_HOLD_THRESHOLD_MS
+            }
+            val params = WindowManager.LayoutParams(
+                widthPx,
+                heightPx,
+                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                    WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+                PixelFormat.TRANSLUCENT
+            ).apply {
+                // Same centering invariant as the content window (x = 0).
+                gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+                x = 0
+                y = yPx
+            }
+            runCatchingLogged(TAG, "Failed to add pill touch-catcher window") {
+                windowManager.addView(view, params)
+                pillTouchView = view
+                pillTouchParams = params
+                applyPillTouchGeometry(view, settings, notificationCount, widthPx, heightPx)
+            } ?: run {
+                pillTouchView = null
+                pillTouchParams = null
+            }
+        } else {
+            val params = pillTouchParams
+            if (params != null &&
+                (params.width != widthPx || params.height != heightPx || params.y != yPx)
+            ) {
+                params.width = widthPx
+                params.height = heightPx
+                params.y = yPx
+                runCatchingLogged(TAG, "Failed to resize pill touch-catcher window") {
+                    windowManager.updateViewLayout(existing, params)
+                }
+            }
+            applyPillTouchGeometry(existing, settings, notificationCount, widthPx, heightPx)
+        }
+    }
+
+    private fun removePillTouchWindow() {
+        val view = pillTouchView ?: return
+        pillTouchView = null
+        pillTouchParams = null
+        // A removal mid-gesture also kills the drag: settle the pill back.
+        springPillDragBack()
+        if (!::windowManager.isInitialized) return
+        runCatchingLogged(TAG, "Failed to remove pill touch-catcher window") {
+            if (view.isAttachedToWindow) {
+                windowManager.removeViewImmediate(view)
+            }
+        }
+    }
+
+    /** Streams the collapsed-pill gestures into the ViewModel/content. */
+    private val pillTouchListener = object : PillTouchHandlerView.Listener {
+        override fun onTouchDown() {
+            if (destroyed || !::viewModel.isInitialized) return
+            pillDragAnimJob?.cancel()
+            pillDragAnimJob = null
+        }
+
+        override fun onTouchMove(totalDyPx: Float) {
+            if (destroyed || !::viewModel.isInitialized) return
+            // While the pill is UI-hidden (auto-hide / hide-when-idle) only
+            // reveal-taps matter; the invisible pill must not chase drags.
+            if (viewModel.isPillUiHidden.value) return
+            val maxPx = PILL_DRAG_MAX_DP * resources.displayMetrics.density
+            viewModel.pillDragOffsetPx.value = totalDyPx.coerceIn(-maxPx, maxPx)
+        }
+
+        override fun onTouchUp(
+            totalDyPx: Float,
+            isDragging: Boolean,
+            holdRegistered: Boolean,
+            elapsedMs: Long,
+            downX: Float,
+            downY: Float
+        ) {
+            if (destroyed || !::viewModel.isInitialized) return
+            resolvePillTouchUp(
+                totalDyPx,
+                isDragging,
+                holdRegistered,
+                elapsedMs,
+                downX,
+                downY
+            )
+        }
+
+        override fun onTouchCancelled() {
+            if (destroyed || !::viewModel.isInitialized) return
+            springPillDragBack()
+        }
+
+        override fun onHoldRegistered() {
+            if (destroyed) return
+            triggerPillHoldHaptic()
         }
     }
 
     /**
-     * Resumes on the first OnGlobalLayout callback after a resize (the view's
-     * first traversal at the new window size), bounded by a short timeout so a
-     * quiet relayout can never wedge the mask on.
+     * Resolves the end of a collapsed-pill gesture with EXACTLY the semantics
+     * of the Compose collapsed-pill pointer handler (IslandOverlayView):
+     * swipe-up past 35dp fires the configured dismiss action (hold selects
+     * holdSwipeUpAction, a quick swipe swipeUpAction), a release under 10px
+     * is a tap (bubble hit → select + expand, otherwise the configured
+     * tapAction), and while the pill is UI-hidden only in-band reveal taps
+     * fire.
      */
-    private suspend fun awaitNextLayoutOrTimeout() {
-        val view = islandView ?: return
-        withTimeoutOrNull(WINDOW_MASK_MAX_WAIT_MS) {
-            suspendCancellableCoroutine { continuation ->
-                val observer = view.viewTreeObserver
-                val listener = object : android.view.ViewTreeObserver.OnGlobalLayoutListener {
-                    override fun onGlobalLayout() {
-                        if (observer.isAlive) {
-                            observer.removeOnGlobalLayoutListener(this)
-                        }
-                        if (continuation.isActive) {
-                            continuation.resume(Unit)
-                        }
-                    }
+    private fun resolvePillTouchUp(
+        totalDyPx: Float,
+        isDragging: Boolean,
+        holdRegistered: Boolean,
+        elapsedMs: Long,
+        downX: Float,
+        downY: Float
+    ) {
+        val view = pillTouchView
+        val settings = viewModel.settings.value
+        val density = resources.displayMetrics.density
+        val swipeUpThresholdPx = -PILL_SWIPE_THRESHOLD_DP * density
+        val uiHidden = viewModel.isPillUiHidden.value
+        val bubbleIndex = view?.bubbleIndexAt(downX, downY) ?: -1
+
+        var firedSwipeAction = false
+        if (!uiHidden &&
+            bubbleIndex < 0 &&
+            isDragging &&
+            totalDyPx < swipeUpThresholdPx
+        ) {
+            val action = if (holdRegistered || elapsedMs >= PILL_HOLD_THRESHOLD_MS) {
+                settings.holdSwipeUpAction
+            } else {
+                settings.swipeUpAction
+            }
+            when (action) {
+                SmartIslandSettings.GestureActions.DISMISS_ALL -> {
+                    firedSwipeAction = true
+                    viewModel.dismissAllNotifications()
                 }
-                runCatching {
-                    observer.addOnGlobalLayoutListener(listener)
-                }.onFailure {
-                    if (continuation.isActive) continuation.resume(Unit)
-                    return@suspendCancellableCoroutine
+                SmartIslandSettings.GestureActions.DISMISS -> {
+                    firedSwipeAction = true
+                    viewModel.dismissCurrentNotification()
                 }
-                continuation.invokeOnCancellation {
-                    if (observer.isAlive) {
-                        runCatching { observer.removeOnGlobalLayoutListener(listener) }
-                    }
+                else -> Unit
+            }
+        }
+
+        if (firedSwipeAction) {
+            // Fired an action: snap to rest so the transition runs from a
+            // settled pill with nothing else moving (Compose parity).
+            pillDragAnimJob?.cancel()
+            viewModel.pillDragOffsetPx.value = 0f
+        } else {
+            springPillDragBack()
+        }
+
+        val isTap = !isDragging || kotlin.math.abs(totalDyPx) < 10f
+        if (!isTap) return
+        if (uiHidden) {
+            // Hidden pill: only taps inside the pill's own band reveal it
+            // (parity with the in-Compose hidden tap target).
+            if (view?.isInsidePillBand(downX, downY) == true) {
+                viewModel.requestPillReveal()
+            }
+            return
+        }
+        if (bubbleIndex >= 0) {
+            // Companion bubble tap: select that notification and expand
+            // (parity with the Compose bubbles' clickables).
+            val list = viewModel.visibleNotifications.value
+            val secondary = list.firstOrNull { it.key != list.getOrNull(viewModel.selectedIndex.value)?.key }
+            val tertiary = list.firstOrNull {
+                it.key != list.getOrNull(viewModel.selectedIndex.value)?.key && it.key != secondary?.key
+            }
+            val target = if (bubbleIndex == 0) secondary else tertiary
+            val index = target?.let { t -> list.indexOfFirst { it.key == t.key } } ?: -1
+            if (index >= 0) {
+                viewModel.setSelectedNotificationIndex(index)
+            }
+            viewModel.toggleExpanded()
+        } else {
+            when (settings.tapAction) {
+                SmartIslandSettings.GestureActions.TOGGLE -> viewModel.toggleExpanded()
+                else -> Unit
+            }
+        }
+    }
+
+    /**
+     * Fills the catcher's pill/bubble hit geometry (view-local rectangles).
+     * Mirrors collapsedWindowWidthPx + IslandOverlayView's collapsedMainLeft
+     * so a tap lands on exactly the bubble/pill the user sees.
+     */
+    private fun applyPillTouchGeometry(
+        view: PillTouchHandlerView,
+        settings: SmartIslandSettings,
+        notificationCount: Int,
+        viewWidthPx: Int,
+        viewHeightPx: Int
+    ) {
+        val density = resources.displayMetrics.density
+        val metrics = resources.displayMetrics
+        val isIdlePill = notificationCount == 0 && settings.useCutoutSizeWhenIdle
+        val mainWidthDp = if (isIdlePill) settings.idleWidth else settings.width
+        val pillXOffsetDp = if (isIdlePill) settings.idleXOffset else settings.xOffset
+        val mainWidthPx = mainWidthDp * density
+        val circleSizePx = settings.height * density
+        val gapPx = 8f * density
+        val edgePaddingPx = 8f * density
+        val touchPaddingPx = 6f * density
+
+        val companionExtraPx = when {
+            notificationCount >= 3 -> 2 * (gapPx + circleSizePx)
+            notificationCount >= 2 -> gapPx + circleSizePx
+            else -> 0f
+        }
+        val screenCenter = metrics.widthPixels / 2f
+        val desiredMainLeftPx = screenCenter + pillXOffsetDp * density - mainWidthPx / 2f
+        val maxMainLeftPx = (metrics.widthPixels - companionExtraPx - mainWidthPx - edgePaddingPx)
+            .coerceAtLeast(edgePaddingPx)
+        val mainLeftPx = desiredMainLeftPx.coerceIn(edgePaddingPx, maxMainLeftPx)
+
+        // The catcher window is horizontally centered (x = 0), so its left
+        // edge on screen is (screenWidth - viewWidth) / 2. The band height is
+        // the window height — NOT view.height, which is still 0 before the
+        // first layout pass on the add path.
+        val windowLeftPx = (metrics.widthPixels - viewWidthPx) / 2f
+        val bandBottom = viewHeightPx.toFloat().coerceAtLeast(1f)
+
+        val pillRect = RectF(
+            mainLeftPx - windowLeftPx - touchPaddingPx,
+            0f,
+            mainLeftPx - windowLeftPx + mainWidthPx + touchPaddingPx,
+            bandBottom
+        )
+        val secondaryLeft = mainLeftPx + mainWidthPx + gapPx
+        val secondaryRect = if (notificationCount >= 2) {
+            RectF(
+                secondaryLeft - windowLeftPx,
+                0f,
+                secondaryLeft + circleSizePx - windowLeftPx,
+                bandBottom
+            )
+        } else {
+            RectF()
+        }
+        val tertiaryLeft = secondaryLeft + circleSizePx + gapPx
+        val tertiaryRect = if (notificationCount >= 3) {
+            RectF(
+                tertiaryLeft - windowLeftPx,
+                0f,
+                tertiaryLeft + circleSizePx - windowLeftPx,
+                bandBottom
+            )
+        } else {
+            RectF()
+        }
+        view.setGestureGeometry(pillRect, secondaryRect, tertiaryRect)
+    }
+
+    /**
+     * Bouncy return of the pill to its rest y after a released/cancelled drag.
+     *
+     * Implemented as a tiny semi-implicit spring integrator instead of
+     * androidx Animatable: Animatable.animateTo needs a Compose
+     * MonotonicFrameClock in the coroutine context, which the service scope
+     * does not carry — a plain loop with ~16ms steps reproduces the same
+     * MediumBouncy feel with zero frame-clock requirements.
+     */
+    private fun springPillDragBack() {
+        pillDragAnimJob?.cancel()
+        if (!::viewModel.isInitialized) return
+        val start = viewModel.pillDragOffsetPx.value
+        if (start == 0f) return
+        pillDragAnimJob = serviceScope.launch {
+            var value = start
+            var velocity = 0f
+            // spring(dampingRatio = MediumBouncy (0.5), stiffness = StiffnessMedium (1500))
+            val stiffness = 1500f
+            val damping = 2f * 0.5f * kotlin.math.sqrt(stiffness)
+            val dt = 0.016f
+            try {
+                while (kotlin.math.abs(value) > 0.1f || kotlin.math.abs(velocity) > 1f) {
+                    val acceleration = -stiffness * value - damping * velocity
+                    velocity += acceleration * dt
+                    value += velocity * dt
+                    if (destroyed || !::viewModel.isInitialized) return@launch
+                    viewModel.pillDragOffsetPx.value = value
+                    delay(16)
+                }
+            } finally {
+                if (!destroyed && ::viewModel.isInitialized) {
+                    viewModel.pillDragOffsetPx.value = 0f
+                }
+            }
+        }
+    }
+
+    /** Same hold feedback the Compose pill produces (device suppresses toasts). */
+    private fun triggerPillHoldHaptic() {
+        runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val vm = getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? android.os.VibratorManager
+                val vibrator = vm?.defaultVibrator
+                if (vibrator?.hasVibrator() == true) {
+                    vibrator.vibrate(android.os.VibrationEffect.createOneShot(60L, android.os.VibrationEffect.DEFAULT_AMPLITUDE))
+                    return
+                }
+            }
+            @Suppress("DEPRECATION")
+            val vibrator = getSystemService(Context.VIBRATOR_SERVICE) as? android.os.Vibrator
+            if (vibrator?.hasVibrator() == true) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    vibrator.vibrate(android.os.VibrationEffect.createOneShot(60L, android.os.VibrationEffect.DEFAULT_AMPLITUDE))
+                } else {
+                    @Suppress("DEPRECATION")
+                    vibrator.vibrate(60L)
                 }
             }
         }
     }
 
     /**
-     * Width of the narrow collapsed window on devices without the
-     * touchableRegion API. The window is horizontally CENTERED (x = 0, same
-     * center as the expanded window) and sized to contain the screen-anchored
+     * Width of the pill TOUCH-CATCHER window (devices without the
+     * touchableRegion API). The catcher is horizontally CENTERED (x = 0, same
+     * center as the content window) and sized to cover the screen-anchored
      * collapsed content: the main pill at screenCenter + xOffset, companion
      * bubbles extending to the right, plus the usual 16dp side padding.
      *
@@ -945,10 +1253,9 @@ class SmartIslandOverlayService : AccessibilityService() {
      * center — it buys a collapsed state whose window never moves at all,
      * which is what makes the transition and the steady state jitter-free.
      *
-     * Centering is what makes the collapsed state stable: the delayed
-     * expanded→collapsed resize keeps the window center fixed, so
-     * renderedX = screenCenter + target for every element before, during and
-     * after the resize — no compensation, no animation, no jumps.
+     * Centering is what keeps the collapsed state stable: the catcher and the
+     * content share the same center, so renderedX = screenCenter + target for
+     * every element — no compensation, no animation, no jumps.
      */
     private fun collapsedWindowWidthPx(
         settings: SmartIslandSettings,
@@ -989,6 +1296,7 @@ class SmartIslandOverlayService : AccessibilityService() {
         isWindowExpanded = false
         collapseJob?.cancel()
         collapseJob = null
+        removePillTouchWindow()
         if (!::windowManager.isInitialized) return
         runCatchingLogged(TAG, "Failed to remove view") {
             if (view.isAttachedToWindow) {
@@ -998,23 +1306,13 @@ class SmartIslandOverlayService : AccessibilityService() {
     }
 
     private fun collapsedParams(settings: SmartIslandSettings): WindowManager.LayoutParams {
-        val density = resources.displayMetrics.density
-        val notificationCount = if (::viewModel.isInitialized) viewModel.notifications.value.size else 0
-        // Initial collapsed window: horizontally centered (x = 0) like every
-        // other window state, sized to contain the screen-anchored collapsed
-        // content (see collapsedWindowWidthPx). On touchableRegion devices the
-        // window is born MATCH_PARENT in both axes so expand/collapse NEVER
-        // resizes it (see updateWindowLayoutParams — resize ghosts).
-        val w = if (isTouchableRegionSupported) {
-            WindowManager.LayoutParams.MATCH_PARENT
-        } else {
-            collapsedWindowWidthPx(settings, notificationCount, density)
-        }
-        val h = if (isTouchableRegionSupported) {
-            WindowManager.LayoutParams.MATCH_PARENT
-        } else {
-            ((settings.height + 16f) * density).toInt()
-        }
+        // TWO-WINDOW ARCHITECTURE: the content window is born MATCH_PARENT in
+        // BOTH axes on EVERY device class and is never resized afterwards —
+        // expand/collapse are pure flag/child-window swaps (see
+        // updateWindowLayoutParams + syncPillTouchWindow). Touch containment
+        // while collapsed comes from the insets-listener region (reflection
+        // class) or the FLAG_NOT_TOUCHABLE + touch-catcher pair (no-reflection
+        // class), never from a narrow frame.
         val currentFlags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
             WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
             WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
@@ -1022,8 +1320,8 @@ class SmartIslandOverlayService : AccessibilityService() {
             WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED
 
         return WindowManager.LayoutParams(
-            w,
-            h,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             currentFlags,
             PixelFormat.TRANSLUCENT
@@ -1640,28 +1938,25 @@ class SmartIslandOverlayService : AccessibilityService() {
         private const val WINDOWING_MODE_FREEFORM = 5
         private const val OVERLAY_CHANNEL_ID = "smart_island_overlay"
         private const val OVERLAY_CHANNEL_NAME = "Smart Island overlay"
-        // The ONE and ONLY expanded→collapsed window resize (where the
-        // touchableRegion reflection is unavailable). Device testing (rounds
-        // O–Q) showed BOTH the raw resize transient (SurfaceFlinger stretches
-        // the old full-screen buffer into the narrow window — the "duplicate
-        // island") AND the masked-resize blink are conspicuous when they fire
-        // MID-MORPH: the island vanished ("flashed into the idle state") and
-        // popped back at the end of the animation. The springs (stiffness 520,
-        // damping .72–.76) are visually settled after ~300ms, so the resize
-        // now waits them out: the morph plays out entirely inside the stable
-        // full-screen window — exactly the original's animation path — and
-        // the ~100ms mask/blink happens once the pill is at rest, where the
-        // pre- and post-resize frames are identical and the blink is the
-        // least perceptible it can be. On touchableRegion devices there is
-        // no resize at all (the window is MATCH_PARENT in every state).
+        // Delay before the expanded→collapsed TOUCH HANDOVER (where the
+        // touchableRegion reflection is unavailable). Rounds O–Q showed BOTH
+        // the raw resize transient (SurfaceFlinger stretches the old
+        // full-screen buffer into the narrow window — the "duplicate island")
+        // AND the masked-resize blink (island invisible for ~100ms) are
+        // conspicuous around the collapse. The two-window architecture removed
+        // the resize entirely — expand/collapse are invisible flag/child-window
+        // swaps now — so this delay's remaining job is purely behavioral: keep
+        // the full-screen content window touchable (tap-outside-to-toggle,
+        // card gestures) until the collapse springs are visually settled
+        // (stiffness 520, damping .72–.76 → ~300ms), then hand touches to the
+        // pill catcher.
         private const val AUTO_COLLAPSE_DELAY_MS = 420L
 
-        // Masked-resize timing (touchableRegion-less devices): the first value
-        // is how long the transparent buffer gets to render BEFORE the window
-        // resize (two 60Hz vsync periods), the second bounds the wait for the
-        // first layout at the NEW size before the mask is dropped anyway.
-        private const val WINDOW_MASK_SETTLE_MS = 40L
-        private const val WINDOW_MASK_MAX_WAIT_MS = 150L
+        // Collapsed-pill gesture constants (parity with IslandOverlayView's
+        // pointer handler, which serves the touchableRegion class).
+        private const val PILL_HOLD_THRESHOLD_MS = 300L
+        private const val PILL_SWIPE_THRESHOLD_DP = 35f
+        private const val PILL_DRAG_MAX_DP = 100f
     }
 
     /**

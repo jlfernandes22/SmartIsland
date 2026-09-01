@@ -32,6 +32,12 @@ data class SmartIslandSettings(
     val showRecentApps: Boolean = false,
     val welcomeDialogShown: Boolean = false,
     val showOnLockScreen: Boolean = false,
+    // While the keyguard is showing, the island stays visible whenever there
+    // are unopened notifications — even when showOnLockScreen is off. With
+    // hideFromNotificationShade on, island-only notifications were cancelled
+    // from the system shade, so without this they were invisible EVERYWHERE
+    // until unlock (they never reached the lock screen either).
+    val showUnreadOnLockScreen: Boolean = true,
     val lockScreenPrivacy: String = "AppIconOnly",
     val showNotificationActions: Boolean = true,
     val hideFromNotificationShade: Boolean = true,

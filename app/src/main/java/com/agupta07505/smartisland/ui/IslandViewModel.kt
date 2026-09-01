@@ -65,15 +65,29 @@ class IslandViewModel(
     val isLocked = MutableStateFlow(false)
     val isInputActive = MutableStateFlow(false)
 
-    // Set by the service around a window-frame resize on devices WITHOUT the
-    // touchableRegion reflection. During a resize SurfaceFlinger stretches the
-    // last submitted buffer into the new window bounds, which renders a ghost
-    // duplicate of the island (streaks across the top corners on expand, a
-    // squashed "second island" on collapse). While this flag is on, the overlay
-    // composable draws a fully transparent buffer, so the stretched frame is
-    // invisible. Devices WITH the reflection never resize their window at all
-    // and never raise this flag.
-    val windowResizeMask = MutableStateFlow(false)
+    // Live vertical drag offset (px) of the collapsed pill, streamed by the
+    // pill touch-catcher window (PillTouchHandlerView) on devices WITHOUT the
+    // touchableRegion reflection — on those the content window is
+    // FLAG_NOT_TOUCHABLE while collapsed, so the Compose pointer handler
+    // never sees the gesture and the catcher owns it. IslandOverlayView adds
+    // this to the pill's translationY so the pill follows the finger, exactly
+    // like the in-Compose dragOffset does on reflection-capable devices.
+    val pillDragOffsetPx = MutableStateFlow(0f)
+
+    // Mirrors the overlay's Compose-side isHiding state (hideWhenIdle pill,
+    // auto-hide pill). The touch catcher cannot read Compose-local state, so
+    // IslandOverlayView writes it back here; while true the catcher only
+    // forwards taps (the hidden pill reveals/toggles, it never swipes).
+    val isPillUiHidden = MutableStateFlow(false)
+
+    // Tap on the collapsed-pill area routed from the touch catcher so the
+    // Compose state (auto-hidden vs idle-hidden) decides between awaken and
+    // toggle — the exact logic of the in-Compose hidden-pill tap target.
+    val pillRevealTick = MutableStateFlow(0)
+
+    fun requestPillReveal() {
+        pillRevealTick.value += 1
+    }
 
     // Transient feedback rendered INSIDE the expanded island (e.g. by the idle
     // info menu). The test device suppresses Toasts for this app, so actions
@@ -169,11 +183,13 @@ class IslandViewModel(
     }
 
     fun expand() {
+        pillDragOffsetPx.value = 0f
         expanded.value = true
     }
 
     fun collapse() {
         isInputActive.value = false
+        pillDragOffsetPx.value = 0f
         expanded.value = false
     }
 

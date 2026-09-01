@@ -61,6 +61,7 @@ class SmartIslandSettingsRepository(private val context: Context) {
         val ShowRecentApps = booleanPreferencesKey("show_recent_apps")
         val WelcomeDialogShown = booleanPreferencesKey("welcome_dialog_shown")
         val ShowOnLockScreen = booleanPreferencesKey("show_on_lock_screen")
+        val ShowUnreadOnLockScreen = booleanPreferencesKey("show_unread_on_lock_screen")
         val LockScreenPrivacy = stringPreferencesKey("lock_screen_privacy")
         val ShowNotificationActions = booleanPreferencesKey("show_notification_actions")
         val HideFromNotificationShade = booleanPreferencesKey("hide_from_notification_shade")
@@ -174,6 +175,7 @@ class SmartIslandSettingsRepository(private val context: Context) {
                 showRecentApps = prefs[Keys.ShowRecentApps] ?: defaults.showRecentApps,
                 welcomeDialogShown = prefs[Keys.WelcomeDialogShown] ?: defaults.welcomeDialogShown,
                 showOnLockScreen = prefs[Keys.ShowOnLockScreen] ?: defaults.showOnLockScreen,
+                showUnreadOnLockScreen = prefs[Keys.ShowUnreadOnLockScreen] ?: defaults.showUnreadOnLockScreen,
                 lockScreenPrivacy = prefs[Keys.LockScreenPrivacy]
                     ?.takeIf { it in VALID_LOCK_SCREEN_PRIVACY_VALUES }
                     ?: defaults.lockScreenPrivacy,
@@ -388,6 +390,9 @@ class SmartIslandSettingsRepository(private val context: Context) {
 
     suspend fun setShowOnLockScreen(value: Boolean) = editSafely {
         it[Keys.ShowOnLockScreen] = value
+    }
+    suspend fun setShowUnreadOnLockScreen(value: Boolean) = editSafely {
+        it[Keys.ShowUnreadOnLockScreen] = value
     }
     suspend fun setLockScreenPrivacy(value: String) = editSafely {
         it[Keys.LockScreenPrivacy] = value.takeIf { privacy ->
