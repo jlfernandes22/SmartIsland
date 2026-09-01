@@ -16,6 +16,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import com.agupta07505.smartisland.data.INotificationRepository
 import com.agupta07505.smartisland.data.SmartIslandSettingsRepository
+import com.agupta07505.smartisland.ui.SafeModeScreen
 import com.agupta07505.smartisland.ui.SmartIslandHomeScreen
 import com.agupta07505.smartisland.ui.SmartIslandTheme
 import com.agupta07505.smartisland.util.CrashGuard
@@ -75,12 +76,40 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        // Crash-loop breaker, Round W: safe mode previously gated only the
+        // services — the Activity STILL composed the full home screen, so a
+        // crash living in composition/first-frame work killed every launch
+        // ~1s in, safe mode or not, and the persisted Java stack could never
+        // be copied. When latched, we compose ONLY the minimal evidence
+        // screen (no repositories, no DataStore, no heavy composition) so
+        // the process stays up and the user can read/copy the report.
+        val startInSafeMode = runCatching { CrashGuard.isSafeMode(this) }.getOrDefault(false)
+        if (startInSafeMode) {
+            CrashGuard.recordHeartbeat(this, "safe-mode-ui")
+        }
+
         setContent {
             SmartIslandTheme {
-                SmartIslandHomeScreen(
-                    repository = settingsRepository,
-                    notificationRepository = notificationRepository
-                )
+                if (startInSafeMode) {
+                    SafeModeScreen(
+                        report = runCatching {
+                            CrashGuard.buildLaunchCrashReport(this)
+                        }.getOrNull(),
+                        safeModeSince = runCatching {
+                            CrashGuard.safeModeSince(this)
+                        }.getOrNull(),
+                        onExitSafeMode = {
+                            CrashGuard.recordHeartbeat(this, "safe-mode-exit")
+                            CrashGuard.exitSafeMode(this)
+                            recreate()
+                        }
+                    )
+                } else {
+                    SmartIslandHomeScreen(
+                        repository = settingsRepository,
+                        notificationRepository = notificationRepository
+                    )
+                }
             }
         }
     }
