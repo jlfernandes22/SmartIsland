@@ -289,7 +289,27 @@ class SmartIslandOverlayService : AccessibilityService() {
     }
 
     override fun onCreate() {
-        super.onCreate()
+        // ROUND-X: safe-mode gate moved BEFORE super.onCreate(). The live
+        // device died inside super (Hilt injection) with "Unable to create
+        // service", so a gate that sat behind it never ran and the crash
+        // loop was unbreakable. Same pattern as the listener service: in
+        // safe mode no injection code executes at all.
+        if (runCatching { CrashGuard.isSafeMode(this) }.getOrDefault(false)) {
+            android.util.Log.w(TAG, "Safe mode latched — overlay stays down until the user exits it")
+            stopSelf()
+            return
+        }
+        // super.onCreate() performs Hilt member injection; an exception
+        // escaping it is fatal for the whole process. Catch, persist the
+        // full root-cause chain, degrade to "island missing".
+        try {
+            super.onCreate()
+        } catch (t: Throwable) {
+            CrashGuard.recordBoundaryCrash(this, "overlay-super-onCreate", t)
+            android.util.Log.e(TAG, "Injection failed in overlay onCreate — overlay disabled, process survives", t)
+            stopSelf()
+            return
+        }
         destroyed = false
 
         // ROUND-V CRASH-LOOP BREAKER: once safe mode latches (2+ crashes
@@ -297,8 +317,9 @@ class SmartIslandOverlayService : AccessibilityService() {
         // so whatever re-crashes the process at bind time cannot run again.
         // The user breaks out explicitly via the home-screen banner — the
         // island being temporarily absent beats an app that can never open.
-        if (CrashGuard.isSafeMode(this)) {
-            android.util.Log.w(TAG, "Safe mode latched — overlay stays down until the user exits it")
+        // (ROUND-X: the latched check itself now lives above super.onCreate();
+        // kept here as the defensive re-read for mid-create latching.)
+        if (runCatching { CrashGuard.isSafeMode(this) }.getOrDefault(false)) {
             stopSelf()
             return
         }
@@ -318,6 +339,11 @@ class SmartIslandOverlayService : AccessibilityService() {
         windowManager = resolvedWindowManager
 
         val initializedViewModel = runCatchingLogged(TAG, "Overlay ViewModel initialization failed") {
+            // ROUND-X: a partially-completed injection must never surface as
+            // a lateinit-access death inside the factory.
+            if (!::repository.isInitialized || !::notificationRepository.isInitialized) {
+                return@runCatchingLogged null
+            }
             // Lifecycle must be restored before the service-owned ViewModel is created.
             overlayOwners.resume()
             ViewModelProvider(

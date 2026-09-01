@@ -7,14 +7,17 @@
 
 package com.agupta07505.smartisland
 
+import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.service.notification.NotificationListenerService
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import com.agupta07505.smartisland.di.SmartIslandRepositories
+import com.agupta07505.smartisland.service.SmartIslandNotificationListenerService
 import com.agupta07505.smartisland.ui.SafeModeScreen
 import com.agupta07505.smartisland.ui.SmartIslandHomeScreen
 import com.agupta07505.smartisland.ui.SmartIslandTheme
@@ -126,6 +129,20 @@ class MainActivity : ComponentActivity() {
                         onExitSafeMode = {
                             CrashGuard.recordHeartbeat(this, "safe-mode-exit")
                             CrashGuard.exitSafeMode(this)
+                            // ROUND-X: while safe mode was latched, the
+                            // listener service asked the system to stop
+                            // rebinding it (requestUnbind). Restore the
+                            // binding explicitly the moment the user leaves
+                            // safe mode, or island notifications stay dead
+                            // until the next manual permission toggle.
+                            runCatching {
+                                NotificationListenerService.requestRebind(
+                                    ComponentName(
+                                        this@MainActivity,
+                                        SmartIslandNotificationListenerService::class.java
+                                    )
+                                )
+                            }
                             recreate()
                         }
                     )

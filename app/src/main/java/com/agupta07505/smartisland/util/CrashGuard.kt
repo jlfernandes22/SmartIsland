@@ -133,6 +133,11 @@ object CrashGuard {
      */
     fun recordBoundaryCrash(context: Context, where: String, throwable: Throwable) {
         runCatching {
+            // ROUND-X: boundary catches are exactly the deaths whose cause
+            // chain the platform formatting kept losing (the live device's
+            // "Unable to create service" reports never carried a "Caused
+            // by"). Reconstruct the full chain explicitly.
+            val root = runCatching { throwable.rootCause() }.getOrNull() ?: throwable
             val header = buildString {
                 append("Boundary crash caught at: ").append(where)
                 append(" — ").append(formatTime(System.currentTimeMillis()))
@@ -141,9 +146,15 @@ object CrashGuard {
                 lastHeartbeatRecord(context)?.let {
                     append("last heartbeat: ").append(it.replace("|", " @ ")).append('\n')
                 }
+                append("root cause: ")
+                    .append(runCatching { root.javaClass.name }.getOrNull() ?: "Unknown")
+                val rootMsg = runCatching { root.message }.getOrNull()
+                if (!rootMsg.isNullOrBlank()) append(": ").append(rootMsg.take(300))
+                append('\n')
                 append('\n')
             }
-            val stack = android.util.Log.getStackTraceString(throwable)
+            val stack = runCatching { throwable.fullStackTrace() }
+                .getOrDefault(android.util.Log.getStackTraceString(throwable))
             File(context.filesDir, BOUNDARY_FILE)
                 .writeText(header + stack)
             context.getExternalFilesDir(null)?.let { dir ->

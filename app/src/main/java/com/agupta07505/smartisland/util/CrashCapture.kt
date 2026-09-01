@@ -98,6 +98,15 @@ object CrashCapture {
 
     private fun writeCrashFile(context: Context, thread: Thread, throwable: Throwable) {
         val file = File(context.filesDir, FILE_NAME)
+        // ROUND-X: surface the ROOT cause in the header so one glance — and
+        // one screenshot of the safe-mode card — carries the diagnosis even
+        // if the stack below is long or the user's OCR flattens it.
+        val root = runCatching { throwable.rootCause() }.getOrNull() ?: throwable
+        val rootLine = buildString {
+            append(runCatching { root.javaClass.simpleName }.getOrNull() ?: "Unknown")
+            val msg = runCatching { root.message }.getOrNull()
+            if (!msg.isNullOrBlank()) append(": ").append(msg.take(300))
+        }
         val header = buildString {
             append("SmartIsland crash")
             append(" — ").append(
@@ -112,10 +121,17 @@ object CrashCapture {
             CrashGuard.lastHeartbeatRecord(context)?.let {
                 append("last heartbeat: ").append(it.replace("|", " @ ")).append('\n')
             }
+            append("root cause: ").append(rootLine).append('\n')
             append('\n')
         }
-        val stack = runCatching { Log.getStackTraceString(throwable) }
-            .getOrDefault(throwable.toString())
+        // ROUND-X: full cause chain, reconstructed explicitly — the live
+        // device produced stack-less / cause-less reports for weeks; never
+        // again trust a single platform-formatting call for the evidence.
+        val stack = runCatching { throwable.fullStackTrace() }
+            .getOrElse {
+                runCatching { Log.getStackTraceString(throwable) }
+                    .getOrDefault(throwable.toString())
+            }
         file.parentFile?.mkdirs()
         file.writeText(header + stack)
         // Belt-and-braces: if private storage is the sick organ on this

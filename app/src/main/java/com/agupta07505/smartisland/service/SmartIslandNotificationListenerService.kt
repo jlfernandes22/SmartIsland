@@ -33,6 +33,7 @@ import android.media.session.MediaSession
 import android.media.session.PlaybackState
 import android.net.Uri
 import android.os.Build
+import android.os.IBinder
 import android.os.SystemClock
 import android.provider.Settings
 import android.service.notification.NotificationListenerService
@@ -113,19 +114,62 @@ class SmartIslandNotificationListenerService : NotificationListenerService() {
     private var lastHistoryCleanupTime = 0L
 
     override fun onCreate() {
-        super.onCreate()
-        // ROUND-V CRASH-LOOP BREAKER: same gate as the overlay service — in
-        // safe mode the listener no-ops and stops so a bind-time re-crash
-        // cannot take the process down again while the user reads the
-        // crash report.
-        if (CrashGuard.isSafeMode(this)) {
+        // ROUND-X CRASH-LOOP BREAKER — ORDER IS EVERYTHING HERE.
+        // The live device (OnePlus CPH2581, SDK 37) died with
+        // "java.lang.RuntimeException: Unable to create service" — the
+        // exception came out of super.onCreate() (Hilt member injection),
+        // which sat BEFORE the safe-mode gate. The gate therefore never
+        // ran, every system rebind re-crashed the whole process, and the
+        // safe-mode screen only ever survived for ~1s. The gate now runs
+        // BEFORE super.onCreate(): in safe mode this service executes NO
+        // injection code at all, so whatever throws in the injector can
+        // never again reach process-killing distance.
+        if (runCatching { CrashGuard.isSafeMode(this) }.getOrDefault(false)) {
             android.util.Log.w(TAG, "Safe mode latched — notification listener stays down until the user exits it")
+            // Best-effort SYSTEM-LEVEL loop breaker: ask NotificationManager
+            // to stop rebinding this listener while safe mode is on. Without
+            // it the system rebinds after every crash/timeout and re-enters
+            // onCreate forever. Restored via requestRebind() when the user
+            // exits safe mode in MainActivity.
+            runCatching { requestUnbind() }
+            stopSelf()
+            return
+        }
+        // super.onCreate() performs the Hilt injection. An exception escaping
+        // it is fatal for the whole process ("Unable to create service") —
+        // catch it, persist the FULL root-cause chain as boundary evidence,
+        // and degrade: the app and overlay stay up, the listener stays down.
+        // Two boundary catches inside the window latch safe mode via
+        // markCrash, which then also requestUnbinds at the gate above.
+        try {
+            super.onCreate()
+        } catch (t: Throwable) {
+            CrashGuard.recordBoundaryCrash(this, "listener-super-onCreate", t)
+            android.util.Log.e(TAG, "Injection failed in listener onCreate — listener disabled, process survives", t)
+            stopSelf()
+            return
+        }
+        // Hilt injects all-or-nothing, but verify before use so a future
+        // partial-injection path can never surface as a lateinit death.
+        if (!::repository.isInitialized ||
+            !::notificationRepository.isInitialized ||
+            !::historyRepository.isInitialized
+        ) {
+            CrashGuard.recordBoundaryCrash(
+                this,
+                "listener-injection-incomplete",
+                IllegalStateException("listener @Inject fields not initialized")
+            )
             stopSelf()
             return
         }
         CrashGuard.recordHeartbeat(this, "listener-create")
-        lockScreenMirror.ensureChannel()
-        registerLockStateReceivers()
+        // These ran raw for years; one throwing system call in a create
+        // path kills the process. Degrade instead of dying.
+        runCatchingLogged(TAG, "listener onCreate body failed") {
+            lockScreenMirror.ensureChannel()
+            registerLockStateReceivers()
+        }
         serviceScope.launch {
             runSuspendCatchingLogged(TAG, "Settings collector failed") {
                 repository.settings.collect { settings ->
@@ -443,6 +487,13 @@ class SmartIslandNotificationListenerService : NotificationListenerService() {
     override fun onListenerDisconnected() {
         isSystemConnected = false
         super.onListenerDisconnected()
+        // ROUND-X: never self-rebind while safe mode is latched or while the
+        // service is degraded (injection failed) — that would fight the
+        // loop breaker by pulling the system straight back into the code
+        // that breaks.
+        val safeMode = runCatching { CrashGuard.isSafeMode(this) }.getOrDefault(false)
+        val degraded = !::repository.isInitialized || !::notificationRepository.isInitialized
+        if (safeMode || degraded) return
         runCatchingLogged(TAG, "Notification-listener self-rebind failed") {
             requestRebind(
                 android.content.ComponentName(
@@ -450,6 +501,24 @@ class SmartIslandNotificationListenerService : NotificationListenerService() {
                     SmartIslandNotificationListenerService::class.java
                 )
             )
+        }
+    }
+
+    override fun onBind(intent: Intent?): IBinder? {
+        // ROUND-X: the framework calls onBind right after onCreate. If
+        // super.onCreate() never completed (safe mode early-return, caught
+        // injection failure), the parent's binder plumbing may be
+        // uninitialized — letting it throw would take the process down with
+        // "Unable to bind service", defeating the whole breaker. Degrade to
+        // null: the system simply unbinds and the process survives.
+        val safeMode = runCatching { CrashGuard.isSafeMode(this) }.getOrDefault(false)
+        val degraded = !::repository.isInitialized || !::notificationRepository.isInitialized
+        if (safeMode || degraded) return null
+        return try {
+            super.onBind(intent)
+        } catch (t: Throwable) {
+            CrashGuard.recordBoundaryCrash(this, "listener-onBind", t)
+            null
         }
     }
 

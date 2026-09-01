@@ -55,3 +55,49 @@ suspend inline fun <T> runSuspendCatchingLogged(
         null
     }
 }
+
+/**
+ * ROUND-X: the persisted crash reports from the live device (OnePlus CPH2581,
+ * SDK 37) repeatedly stopped at the framework boundary —
+ * "RuntimeException: Unable to create service ..." with NO "Caused by"
+ * section and therefore no root exception, i.e. no diagnosis. Whether the
+ * platform clipped the chain or the chain was never there, the fix is the
+ * same: the report writer must not TRUST getStackTraceString alone. This
+ * reconstruction walks the cause chain explicitly (identity-set guarded
+ * against cycles) and formats every level with its own frames, so whatever
+ * the platform logger does, the persisted report carries the complete
+ * root-cause chain.
+ */
+fun Throwable.fullStackTrace(): String {
+    return buildString {
+        var current: Throwable? = this@fullStackTrace
+        val seen = HashSet<Throwable>()
+        var level = 0
+        while (current != null && seen.add(current)) {
+            if (level > 0) append("\nCaused by: ")
+            append(current.javaClass.name)
+            val message = runCatching { current.message }.getOrNull()
+            if (!message.isNullOrBlank()) append(": ").append(message)
+            val frames = runCatching { current.stackTrace }.getOrNull()
+            if (frames != null && frames.isNotEmpty()) {
+                for (frame in frames) append("\n        at ").append(frame.toString())
+            } else {
+                append("\n        <no stack frames available>")
+            }
+            current = runCatching { current.cause }.getOrNull()
+            level++
+        }
+    }
+}
+
+/** The innermost throwable of a chain — the actual root cause. */
+fun Throwable.rootCause(): Throwable {
+    var current: Throwable = this
+    val seen = HashSet<Throwable>().apply { add(this@rootCause) }
+    while (true) {
+        val next = runCatching { current.cause }.getOrNull() ?: break
+        if (!seen.add(next)) break // cycle — stop at the last unique node
+        current = next
+    }
+    return current
+}
