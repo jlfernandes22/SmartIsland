@@ -20,7 +20,6 @@ import com.agupta07505.smartisland.ui.SmartIslandHomeScreen
 import com.agupta07505.smartisland.ui.SmartIslandTheme
 import com.agupta07505.smartisland.util.CrashCapture
 import com.agupta07505.smartisland.util.CrashGuard
-import com.agupta07505.smartisland.util.SmartIslandRepositories
 import com.agupta07505.smartisland.util.SystemServiceRecovery
 import com.agupta07505.smartisland.util.runCatchingLogged
 import dagger.hilt.android.AndroidEntryPoint
