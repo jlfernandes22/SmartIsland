@@ -11,6 +11,7 @@ import android.app.ActivityManager
 import android.app.ApplicationExitInfo
 import android.content.Context
 import android.os.Build
+import androidx.annotation.RequiresApi
 import com.agupta07505.smartisland.BuildConfig
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -43,6 +44,7 @@ object ExitInfoRecorder {
     private const val SEEN_FILE = "exit-seen.txt"
 
     /** Abnormal death reasons we surface; user/swipe/system-cleanup reasons are noise. */
+    @RequiresApi(Build.VERSION_CODES.R)
     private fun isAbnormal(reason: Int): Boolean {
         return reason == ApplicationExitInfo.REASON_CRASH ||
             reason == ApplicationExitInfo.REASON_CRASH_NATIVE ||
@@ -53,6 +55,7 @@ object ExitInfoRecorder {
             reason == ApplicationExitInfo.REASON_INITIALIZATION_FAILURE
     }
 
+    @RequiresApi(Build.VERSION_CODES.R)
     private fun reasonLabel(reason: Int): String = when (reason) {
         ApplicationExitInfo.REASON_CRASH -> "Java crash (uncaught exception)"
         ApplicationExitInfo.REASON_CRASH_NATIVE -> "NATIVE crash (SIGSEGV/SIGABRT)"
@@ -94,6 +97,7 @@ object ExitInfoRecorder {
         return runCatching { file.readText().trim().toLongOrNull() }.getOrNull()
     }
 
+    @RequiresApi(Build.VERSION_CODES.R)
     private fun buildReport(context: Context, record: ApplicationExitInfo): String {
         return buildString {
             append("Process death detected — ")
