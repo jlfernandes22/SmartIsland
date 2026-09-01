@@ -376,4 +376,13 @@
     <string name="expanded_action_reply">回复</string>
     <string name="expanded_action_mark_read">标为已读</string>
     <string name="expanded_action_dismiss">忽略</string>
+    <string name="crash_card_title">检测到上次崩溃</string>
+    <string name="crash_card_desc">应用已崩溃。复制日志并发送——它能精确定位问题。</string>
+    <string name="crash_copy">复制日志</string>
+    <string name="crash_copied">日志已复制</string>
+    <string name="crash_dismiss">忽略</string>
+    <string name="crash_safe_mode_title">崩溃安全模式已启用</string>
+    <string name="crash_safe_mode_desc">应用反复崩溃，后台服务将保持关闭，直到您退出安全模式。</string>
+    <string name="crash_safe_mode_exit">退出安全模式</string>
+    <string name="crash_safe_mode_exited">已退出安全模式——后台服务可以重新启动</string>
 </resources>

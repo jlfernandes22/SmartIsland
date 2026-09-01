@@ -18,7 +18,9 @@ import com.agupta07505.smartisland.data.INotificationRepository
 import com.agupta07505.smartisland.data.SmartIslandSettingsRepository
 import com.agupta07505.smartisland.ui.SmartIslandHomeScreen
 import com.agupta07505.smartisland.ui.SmartIslandTheme
+import com.agupta07505.smartisland.util.CrashGuard
 import com.agupta07505.smartisland.util.SystemServiceRecovery
+import com.agupta07505.smartisland.util.runCatchingLogged
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 
@@ -51,14 +53,26 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        SystemServiceRecovery.requestRecovery(this)
-        requestNotificationPermissionIfNeeded()
+        // Everything below runs BEFORE the first frame can render — a throw
+        // here was invisible (no UI, and previously no persisted trace of
+        // what died). Each site degrades instead of crashing.
+        CrashGuard.recordHeartbeat(this, "activity-create")
+        runCatchingLogged(TAG, "SystemServiceRecovery failed") {
+            SystemServiceRecovery.requestRecovery(this)
+        }
+        runCatchingLogged(TAG, "Notification-permission ask failed") {
+            requestNotificationPermissionIfNeeded()
+        }
 
         if (intent?.getBooleanExtra(EXTRA_REQUEST_BLUETOOTH_PERMISSION, false) == true) {
-            requestBluetoothPermissionIfNeeded()
+            runCatchingLogged(TAG, "Bluetooth-permission ask failed") {
+                requestBluetoothPermissionIfNeeded()
+            }
         }
         if (intent?.getBooleanExtra(EXTRA_REQUEST_TOGGLE_PERMISSIONS, false) == true) {
-            requestTogglePermissionsIfNeeded()
+            runCatchingLogged(TAG, "Toggle-permissions ask failed") {
+                requestTogglePermissionsIfNeeded()
+            }
         }
 
         setContent {
@@ -142,10 +156,15 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        SystemServiceRecovery.requestRecovery(this)
+        CrashGuard.recordHeartbeat(this, "activity-resume")
+        runCatchingLogged(TAG, "SystemServiceRecovery (resume) failed") {
+            SystemServiceRecovery.requestRecovery(this)
+        }
     }
 
     companion object {
+        private const val TAG = "MainActivity"
+
         const val EXTRA_REQUEST_BLUETOOTH_PERMISSION = "request_bluetooth_permission"
 
         /** Overlay → MainActivity: ask for the missing toggle-row permissions. */

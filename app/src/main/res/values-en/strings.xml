@@ -383,4 +383,8 @@
     <string name="crash_copy">Copy log</string>
     <string name="crash_copied">Crash log copied</string>
     <string name="crash_dismiss">Dismiss</string>
+    <string name="crash_safe_mode_title">Crash safe mode active</string>
+    <string name="crash_safe_mode_desc">The app crashed repeatedly, so its background services stay off until you exit safe mode.</string>
+    <string name="crash_safe_mode_exit">Exit safe mode</string>
+    <string name="crash_safe_mode_exited">Safe mode exited — background services can start again</string>
 </resources>

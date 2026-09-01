@@ -7,6 +7,7 @@
 
 package com.agupta07505.smartisland.service
 
+import com.agupta07505.smartisland.util.CrashGuard
 import com.agupta07505.smartisland.util.isCallEnded
 import com.agupta07505.smartisland.util.isDownloadComplete
 import com.agupta07505.smartisland.util.isScreenRecordingComplete
@@ -113,6 +114,16 @@ class SmartIslandNotificationListenerService : NotificationListenerService() {
 
     override fun onCreate() {
         super.onCreate()
+        // ROUND-V CRASH-LOOP BREAKER: same gate as the overlay service — in
+        // safe mode the listener no-ops and stops so a bind-time re-crash
+        // cannot take the process down again while the user reads the
+        // crash report.
+        if (CrashGuard.isSafeMode(this)) {
+            android.util.Log.w(TAG, "Safe mode latched — notification listener stays down until the user exits it")
+            stopSelf()
+            return
+        }
+        CrashGuard.recordHeartbeat(this, "listener-create")
         lockScreenMirror.ensureChannel()
         registerLockStateReceivers()
         serviceScope.launch {
@@ -367,6 +378,7 @@ class SmartIslandNotificationListenerService : NotificationListenerService() {
     override fun onListenerConnected() {
         super.onListenerConnected()
         isSystemConnected = true
+        CrashGuard.recordHeartbeat(this, "listener-connected")
         runCatchingLogged(TAG, "onListenerConnected callback failed") {
             android.util.Log.d(TAG, "onListenerConnected")
             serviceScope.launch {

@@ -41,12 +41,14 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
@@ -98,6 +100,7 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -146,6 +149,9 @@ import com.agupta07505.smartisland.ui.sections.NotificationsAndPrivacySection
 import com.agupta07505.smartisland.ui.sections.PermissionsSection
 import com.agupta07505.smartisland.ui.sections.PositionsSection
 import com.agupta07505.smartisland.ui.sections.SupportSection
+import com.agupta07505.smartisland.util.CrashCapture
+import com.agupta07505.smartisland.util.CrashGuard
+import com.agupta07505.smartisland.util.ExitInfoRecorder
 import com.agupta07505.smartisland.util.SystemServiceRecovery
 import com.agupta07505.smartisland.util.runCatchingLogged
 import kotlinx.coroutines.launch
@@ -300,6 +306,22 @@ fun SmartIslandHomeScreen(
                         }
                     )
 
+                    // ROUND-V CRASH DIAGNOSTICS: the "Last crash detected"
+                    // card previously lived ONLY inside Permissions Center —
+                    // a user mid-crash-loop rarely gets that far. It now
+                    // sits at the very top of the home screen, merged with
+                    // the system exit ledger (native crashes / ANRs /
+                    // system kills never reach the UncaughtExceptionHandler
+                    // and were invisible before), alongside the crash-loop
+                    // breaker banner when safe mode has latched.
+                    CrashDiagnosticsCards(
+                        onExitedSafeMode = {
+                            // Re-ask the health state so the header/enabled
+                            // controls reflect services coming back.
+                            overlayGranted = isAccessibilityServiceEnabled(context)
+                        }
+                    )
+
                     when (selectedTab) {
                         StudioTab.Studio -> {
                             // 1. Master Power Switch Card
@@ -394,6 +416,194 @@ fun SmartIslandHomeScreen(
                         batteryIgnored = isBatteryOptimizationIgnored(context)
                     }
                 )
+            }
+        }
+    }
+}
+
+/**
+ * Round-V crash diagnostics block, top of the home screen:
+ *  1. Crash safe-mode banner — latched by CrashGuard after 2+ crashes in
+ *     15 minutes; background surfaces (overlay, listener, autostart) stay
+ *     down while engaged, breaking any bind-time crash loop.
+ *  2. "Last crash detected" card — merges the system exit-ledger report
+ *     (native crashes / ANRs / system kills, which NEVER reach the
+ *     UncaughtExceptionHandler and previously produced no card at all)
+ *     with the persisted Java crash report. Copy hands the maintainer the
+ *     full evidence; Dismiss clears it (the exit ledger remembers its
+ *     timestamp so an acknowledged death never resurfaces).
+ */
+@Composable
+private fun CrashDiagnosticsCards(onExitedSafeMode: () -> Unit) {
+    val context = LocalContext.current
+    var safeModeActive by remember { mutableStateOf(CrashGuard.isSafeMode(context)) }
+    var crashReport by remember { mutableStateOf(CrashGuard.buildLaunchCrashReport(context)) }
+
+    if (safeModeActive) {
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(20.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.55f)
+            ),
+            elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Warning,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.size(26.dp)
+                    )
+                    Column {
+                        Text(
+                            text = stringResource(R.string.crash_safe_mode_title),
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = stringResource(R.string.crash_safe_mode_desc),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+                OutlinedButton(
+                    onClick = {
+                        CrashGuard.exitSafeMode(context)
+                        safeModeActive = false
+                        onExitedSafeMode()
+                        Toast.makeText(
+                            context,
+                            context.getString(R.string.crash_safe_mode_exited),
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    },
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Text(
+                        text = stringResource(R.string.crash_safe_mode_exit),
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        }
+    }
+
+    if (crashReport != null) {
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(20.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.35f)
+            ),
+            elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(42.dp)
+                            .background(
+                                MaterialTheme.colorScheme.error.copy(alpha = 0.15f),
+                                shape = RoundedCornerShape(12.dp)
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Warning,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.size(24.dp)
+                        )
+                    }
+                    Column {
+                        Text(
+                            text = stringResource(R.string.crash_card_title),
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = stringResource(R.string.crash_card_desc),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+                // Full evidence, scroll-capped so a giant native tombstone
+                // can never blow up the layout.
+                Text(
+                    text = crashReport.orEmpty(),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 220.dp)
+                        .verticalScroll(rememberScrollState())
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.6f))
+                        .padding(10.dp)
+                )
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Button(
+                        onClick = {
+                            val clipboard = context.getSystemService(
+                                android.content.Context.CLIPBOARD_SERVICE
+                            ) as? android.content.ClipboardManager
+                            clipboard?.setPrimaryClip(
+                                android.content.ClipData.newPlainText(
+                                    "SmartIsland crash log",
+                                    crashReport.orEmpty()
+                                )
+                            )
+                            Toast.makeText(
+                                context,
+                                context.getString(R.string.crash_copied),
+                                Toast.LENGTH_LONG
+                            ).show()
+                        },
+                        shape = RoundedCornerShape(12.dp),
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
+                    ) {
+                        Text(
+                            text = stringResource(R.string.crash_copy),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    TextButton(onClick = {
+                        CrashCapture.clear(context)
+                        ExitInfoRecorder.acknowledgeAndClear(context)
+                        crashReport = null
+                    }) {
+                        Text(
+                            text = stringResource(R.string.crash_dismiss),
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
             }
         }
     }

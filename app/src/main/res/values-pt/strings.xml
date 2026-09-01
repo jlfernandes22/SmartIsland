@@ -376,4 +376,13 @@
     <string name="expanded_action_reply">Responder</string>
     <string name="expanded_action_mark_read">Marcar como lida</string>
     <string name="expanded_action_dismiss">Dispensar</string>
+    <string name="crash_card_title">Última falha detetada</string>
+    <string name="crash_card_desc">A aplicação falhou. Copie o registo e envie-o — identifica o problema.</string>
+    <string name="crash_copy">Copiar registo</string>
+    <string name="crash_copied">Registo copiado</string>
+    <string name="crash_dismiss">Ignorar</string>
+    <string name="crash_safe_mode_title">Modo de segurança ativo</string>
+    <string name="crash_safe_mode_desc">A aplicação falhou repetidamente, pelo que os serviços em segundo plano permanecem desligados até sair do modo de segurança.</string>
+    <string name="crash_safe_mode_exit">Sair do modo de segurança</string>
+    <string name="crash_safe_mode_exited">Modo de segurança desativado — os serviços podem arrancar novamente</string>
 </resources>

@@ -7,19 +7,42 @@
 
 package com.agupta07505.smartisland
 
+import android.content.Context
 import android.app.Application
 import com.agupta07505.smartisland.util.CrashCapture
+import com.agupta07505.smartisland.util.CrashGuard
+import com.agupta07505.smartisland.util.ExitInfoRecorder
 import dagger.hilt.android.HiltAndroidApp
 
 @HiltAndroidApp
 class SmartIslandApp : Application() {
+
+    override fun attachBaseContext(base: Context) {
+        // Earliest survivable point: BEFORE super (Hilt) and BEFORE the
+        // ContentProviders run — anything that throws from process start
+        // through provider init now lands in the persisted crash report.
+        // Round U installed here-late (onCreate) and a crash before that
+        // point produced neither report nor card.
+        CrashCapture.install(base)
+        super.attachBaseContext(base)
+        CrashGuard.recordHeartbeat(base, "app-attach")
+    }
+
     override fun onCreate() {
         super.onCreate()
-        // Persist the next crash to filesDir/crash-last.txt before the
-        // process dies, then chain to the system handler. This is what makes
-        // a stack-less "the app crashes" report debuggable: the stack shows
-        // up in Settings → Permissions Center as a shareable card.
+        // (Idempotent — attachBaseContext already installed it; kept here so
+        // a future refactor of attachBaseContext cannot silently un-arm it.)
         CrashCapture.install(this)
+        CrashGuard.recordHeartbeat(this, "app-create")
+        // Read the system's own death ledger (native crashes, ANRs, system
+        // kills — everything the UncaughtExceptionHandler can never see) and
+        // persist an unacknowledged death as a copyable report for the
+        // home-screen crash card.
+        try {
+            ExitInfoRecorder.inspectOnLaunch(this)
+        } catch (_: Throwable) {
+            // A stripped ROM must degrade to "no death report", never crash.
+        }
         bypassHiddenApis()
     }
 
@@ -31,7 +54,7 @@ class SmartIslandApp : Application() {
                 String::class.java,
                 arrayOf<Class<*>>().javaClass
             )
-            
+
             val vmRuntimeClass = forName.invoke(null, "dalvik.system.VMRuntime") as Class<*>
             val getRuntime = getDeclaredMethod.invoke(vmRuntimeClass, "getRuntime", null) as java.lang.reflect.Method
             val setHiddenApiExemptions = getDeclaredMethod.invoke(
@@ -39,7 +62,7 @@ class SmartIslandApp : Application() {
                 "setHiddenApiExemptions",
                 arrayOf(arrayOf<String>().javaClass)
             ) as java.lang.reflect.Method
-            
+
             val vmRuntime = getRuntime.invoke(null)
             setHiddenApiExemptions.invoke(vmRuntime, arrayOf("L") as Any)
             android.util.Log.d("SmartIslandApp", "Successfully bypassed Hidden API restrictions (unsealed reflection)")

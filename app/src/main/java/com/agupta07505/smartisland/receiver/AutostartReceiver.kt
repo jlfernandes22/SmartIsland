@@ -11,6 +11,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import com.agupta07505.smartisland.data.SmartIslandSettingsRepository
+import com.agupta07505.smartisland.util.CrashGuard
 import com.agupta07505.smartisland.util.ShizukuManager
 import com.agupta07505.smartisland.util.runCatchingLogged
 import com.agupta07505.smartisland.util.runSuspendCatchingLogged
@@ -34,6 +35,13 @@ class AutostartReceiver : BroadcastReceiver() {
                 action != Intent.ACTION_LOCKED_BOOT_COMPLETED &&
                 action != Intent.ACTION_USER_PRESENT
             ) return@runCatchingLogged
+
+            // ROUND-V CRASH-LOOP BREAKER: while safe mode is latched, the
+            // auto-grant batch (secure-settings writes that re-arm the
+            // very services suspected of re-crashing the process) must not
+            // run. The status-bar flag re-apply below is equally deferred —
+            // the user re-enables everything by exiting safe mode.
+            if (CrashGuard.isSafeMode(context)) return@runCatchingLogged
 
             val pendingResult = goAsync()
             CoroutineScope(Dispatchers.IO).launch {

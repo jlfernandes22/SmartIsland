@@ -376,4 +376,13 @@
     <string name="expanded_action_reply">Responder</string>
     <string name="expanded_action_mark_read">Marcar como lida</string>
     <string name="expanded_action_dismiss">Dispensar</string>
+    <string name="crash_card_title">Última falha detectada</string>
+    <string name="crash_card_desc">O aplicativo travou. Copie o registro e envie — ele aponta o problema.</string>
+    <string name="crash_copy">Copiar registro</string>
+    <string name="crash_copied">Registro copiado</string>
+    <string name="crash_dismiss">Dispensar</string>
+    <string name="crash_safe_mode_title">Modo de segurança ativo</string>
+    <string name="crash_safe_mode_desc">O aplicativo travou repetidamente, então os serviços em segundo plano ficam desligados até você sair do modo de segurança.</string>
+    <string name="crash_safe_mode_exit">Sair do modo de segurança</string>
+    <string name="crash_safe_mode_exited">Modo de segurança desativado — os serviços podem iniciar novamente</string>
 </resources>

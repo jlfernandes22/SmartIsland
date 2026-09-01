@@ -36,10 +36,27 @@ object CrashCapture {
 
     private const val FILE_NAME = "crash-last.txt"
 
+    @Volatile private var installed = false
+
     fun install(context: Context) {
-        val appContext = context.applicationContext
+        if (installed) return
+        installed = true
+        // Deliberately NOT context.applicationContext: install() runs from
+        // Application.attachBaseContext, before the Application object is
+        // fully registered — application-context resolution there is
+        // implementation-defined. The passed context resolves filesDir
+        // directly and safely at every call site.
+        val appContext = context
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            try {
+                // Latch crash-loop safe mode FIRST (rolling crash-times list):
+                // even if the report write below fails on a wedged filesystem,
+                // the next launch still knows the app is crash-looping.
+                CrashGuard.markCrash(appContext, CrashGuard.lastHeartbeat(appContext))
+            } catch (_: Throwable) {
+                // Never let the evidence-gatherer mask the evidence.
+            }
             try {
                 writeCrashFile(appContext, thread, throwable)
             } catch (_: Throwable) {
@@ -67,6 +84,9 @@ object CrashCapture {
             append(" — device ").append(Build.MANUFACTURER).append(' ').append(Build.MODEL)
             append('\n')
             append("thread: ").append(thread.name).append('\n')
+            CrashGuard.lastHeartbeatRecord(context)?.let {
+                append("last heartbeat: ").append(it.replace('|', " @ ")).append('\n')
+            }
             append('\n')
         }
         val stack = runCatching { Log.getStackTraceString(throwable) }
