@@ -32,11 +32,14 @@ data class SmartIslandSettings(
     val showRecentApps: Boolean = false,
     val welcomeDialogShown: Boolean = false,
     val showOnLockScreen: Boolean = false,
-    // While the keyguard is showing, the island stays visible whenever there
-    // are unopened notifications — even when showOnLockScreen is off. With
-    // hideFromNotificationShade on, island-only notifications were cancelled
-    // from the system shade, so without this they were invisible EVERYWHERE
-    // until unlock (they never reached the lock screen either).
+    // While the keyguard is showing, island-bound notifications are NOT
+    // cancelled from the system (the island-only cancel is deferred to
+    // unlock — see SmartIslandNotificationListenerService), so the LOCK
+    // SCREEN ITSELF presents them. That is the only reliable lock-screen
+    // presentation: overlay windows render below the keyguard, and a
+    // cancelled notification never reaches it — with hideFromNotificationShade
+    // on, a message that arrived while the screen was off was invisible
+    // EVERYWHERE until unlock (it never reached the lock screen either).
     val showUnreadOnLockScreen: Boolean = true,
     val lockScreenPrivacy: String = "AppIconOnly",
     val showNotificationActions: Boolean = true,

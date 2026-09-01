@@ -666,9 +666,13 @@ class SmartIslandOverlayService : AccessibilityService() {
                         val isIdlePill = notificationsCount == 0 && settingsVal.useCutoutSizeWhenIdle
                         val pillWidthDp = if (isIdlePill) settingsVal.idleWidth else settingsVal.width
                         val pillHeightDp = if (isIdlePill) settingsVal.idleHeight else settingsVal.height
-                        // The idle pill's X is its own setting (idleXOffset) —
-                        // the wide island's xOffset must not move it.
-                        val pillXOffsetDp = if (isIdlePill) settingsVal.idleXOffset else settingsVal.xOffset
+                        // The idle pill's X is its own setting (idleXOffset)
+                        // whenever the pill is the IDLE one (no notifications)
+                        // — mirroring IslandOverlayView's collapsedMainOffset,
+                        // which keys the X on the idle state alone, not on the
+                        // cutout-size mode (that only keys the WIDTH). The wide
+                        // island's xOffset must not move the idle pill.
+                        val pillXOffsetDp = if (notificationsCount == 0) settingsVal.idleXOffset else settingsVal.xOffset
 
                         val mainWidthPx = pillWidthDp * density
                         // Same group width as collapsedParams(): with 3+
@@ -690,10 +694,17 @@ class SmartIslandOverlayService : AccessibilityService() {
                         val maxMainLeftPx = (screenWidth - groupWidthPx - edgePaddingPx)
                             .coerceAtLeast(edgePaddingPx)
                         val mainLeftPx = desiredMainLeftPx.coerceIn(edgePaddingPx, maxMainLeftPx)
+                        // The collapsed WIDE pill renders at window-y +
+                        // (yOffset - idleYOffset) — the precision "vertical
+                        // offset" (IslandOverlayView collapsedWideYDelta); the
+                        // idle pill renders at window-y. The region is
+                        // window-local, so the delta shifts the band's top.
+                        val topPx = (if (notificationsCount == 0) 0f
+                            else settingsVal.yOffset - settingsVal.idleYOffset) * density
                         val left = (mainLeftPx - touchPaddingPx).toInt()
-                        val top = 0
+                        val top = topPx.toInt()
                         val right = (mainLeftPx + groupWidthPx + touchPaddingPx).toInt()
-                        val bottom = pillHeightPx.toInt()
+                        val bottom = (topPx + pillHeightPx).toInt()
                         
                         android.util.Log.d(TAG, "onComputeInternalInsets: region set to ($left, $top, $right, $bottom), isSplitMode=$isSplitMode")
                         val region = touchableRegionField.get(insets) as android.graphics.Region
@@ -906,7 +917,12 @@ class SmartIslandOverlayService : AccessibilityService() {
         val notificationCount = viewModel.notifications.value.size
         val widthPx = collapsedWindowWidthPx(settings, notificationCount, density)
         val heightPx = ((settings.height + 16f) * density).toInt()
-        val yPx = settings.idleYOffset.dpToPx()
+        // The catcher's band must cover the pill's SCREEN band: the idle pill
+        // renders at idleYOffset, the collapsed WIDE island at its own
+        // precision yOffset (IslandOverlayView applies the delta inside
+        // Compose) — mirror that mapping here, or touches would land one
+        // (yOffset - idleYOffset) band above the visible pill.
+        val yPx = (if (notificationCount == 0) settings.idleYOffset else settings.yOffset).dpToPx()
         val existing = pillTouchView
         if (existing == null) {
             val view = PillTouchHandlerView(this).apply {
@@ -1120,7 +1136,10 @@ class SmartIslandOverlayService : AccessibilityService() {
         val metrics = resources.displayMetrics
         val isIdlePill = notificationCount == 0 && settings.useCutoutSizeWhenIdle
         val mainWidthDp = if (isIdlePill) settings.idleWidth else settings.width
-        val pillXOffsetDp = if (isIdlePill) settings.idleXOffset else settings.xOffset
+        // Mirror IslandOverlayView's collapsedMainOffset: the X follows the
+        // IDLE offset whenever no notification is shown, regardless of the
+        // cutout-size mode (which only keys the WIDTH).
+        val pillXOffsetDp = if (notificationCount == 0) settings.idleXOffset else settings.xOffset
         val mainWidthPx = mainWidthDp * density
         val circleSizePx = settings.height * density
         val gapPx = 8f * density
@@ -1276,7 +1295,7 @@ class SmartIslandOverlayService : AccessibilityService() {
             notificationCount >= 2 -> compactGapPx + circleSizePx
             else -> 0f
         }
-        val xOffsetPx = (if (isIdlePill) settings.idleXOffset else settings.xOffset) * density
+        val xOffsetPx = (if (notificationCount == 0) settings.idleXOffset else settings.xOffset) * density
         val sidePaddingPx = 16f * density
         val leftExtentPx = mainWidthPx / 2f - xOffsetPx
         val rightExtentPx = mainWidthPx / 2f + companionExtraPx + xOffsetPx

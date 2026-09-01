@@ -13,8 +13,13 @@ import com.agupta07505.smartisland.util.isScreenRecordingComplete
 import com.agupta07505.smartisland.util.runCatchingLogged
 import com.agupta07505.smartisland.util.runSuspendCatchingLogged
 import com.agupta07505.smartisland.util.toIslandMode
+import android.app.KeyguardManager
 import android.app.Notification
 import android.app.NotificationManager
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.Bitmap
 import android.graphics.drawable.Icon
 import android.media.AudioAttributes
@@ -32,6 +37,7 @@ import android.provider.Settings
 import android.service.notification.NotificationListenerService
 import android.service.notification.NotificationListenerService.RankingMap
 import android.service.notification.StatusBarNotification
+import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.toBitmap
 import com.agupta07505.smartisland.data.INotificationHistoryRepository
 import com.agupta07505.smartisland.data.INotificationRepository
@@ -70,6 +76,21 @@ class SmartIslandNotificationListenerService : NotificationListenerService() {
     // notification stays dismissed; a genuinely NEW post after the user has
     // moved on (TTL expired with no further updates) shows normally.
     private val userDismissedKeys = ConcurrentHashMap<String, Long>()
+    // LOCK-SCREEN UNREAD DEFERRAL: with hideFromNotificationShade on,
+    // island-bound notifications were cancelled from the system the moment
+    // they arrived — including while the keyguard was up. A cancelled
+    // notification never reaches the system's lock screen, and the overlay
+    // window renders BELOW the keyguard, so a message that arrived while the
+    // screen was off was invisible EVERYWHERE until unlock (the "unopened
+    // notifications do not appear in the lock screen" report). While the
+    // keyguard is showing — and the Unread-on-Lock-Screen setting is on — the
+    // cancel is therefore DEFERRED: the system lock screen presents the
+    // notification natively (with the app's own privacy), and the pending
+    // cancel executes on ACTION_USER_PRESENT. The island keeps its copy
+    // through that later listener-cancel via the suppression window armed
+    // right before it fires.
+    private val lockDeferredKeys = ConcurrentHashMap<String, Long>()
+    private var userPresentReceiver: BroadcastReceiver? = null
     @Volatile private var currentSettings = SmartIslandSettings.Default
     private val coroutineExceptionHandler = CoroutineExceptionHandler { _, error ->
         android.util.Log.e(TAG, "Unhandled notification-listener coroutine failure", error)
@@ -84,6 +105,7 @@ class SmartIslandNotificationListenerService : NotificationListenerService() {
 
     override fun onCreate() {
         super.onCreate()
+        registerUserPresentReceiver()
         serviceScope.launch {
             runSuspendCatchingLogged(TAG, "Settings collector failed") {
                 repository.settings.collect { settings ->
@@ -92,6 +114,16 @@ class SmartIslandNotificationListenerService : NotificationListenerService() {
                         suppressedKeys.clear()
                     } else {
                         cleanupSuppressedKeys()
+                    }
+                    when {
+                        // Island-only mode is off: the deferred system copies
+                        // must simply stay in the shade where they are.
+                        !settings.enabled || !settings.hideFromNotificationShade ->
+                            lockDeferredKeys.clear()
+                        // Feature switched off mid-lock: restore the old
+                        // island-only behavior immediately.
+                        !settings.showUnreadOnLockScreen -> cancelLockDeferredKeys()
+                        else -> Unit
                     }
                     if (settings.disabledNotificationPackages.isNotEmpty()) {
                         val currentIslandNotifications = notificationRepository.notifications.value
@@ -124,12 +156,17 @@ class SmartIslandNotificationListenerService : NotificationListenerService() {
 
     override fun onDestroy() {
         isSystemConnected = false
+        userPresentReceiver?.let { receiver ->
+            runCatching { unregisterReceiver(receiver) }
+        }
+        userPresentReceiver = null
         pendingRemovals.values.forEach { it.cancel() }
         pendingRemovals.clear()
         pendingSuppressionJobs.values.forEach { it.cancel() }
         pendingSuppressionJobs.clear()
         suppressedKeys.clear()
         userDismissedKeys.clear()
+        lockDeferredKeys.clear()
         iconCache.evictAll()
         serviceScope.cancel()
         super.onDestroy()
@@ -167,7 +204,14 @@ class SmartIslandNotificationListenerService : NotificationListenerService() {
                 )
             ) {
                 android.util.Log.d(TAG, "Cancelling group summary from system shade: ${sbn.key} pkg=${sbn.packageName}")
-                suppressSystemNotification(sbn.key) // adds to suppressedKeys + cancels with retry
+                if (shouldDeferCancelWhileLocked()) {
+                    // While locked the system lock screen should present the
+                    // group ("N new messages") natively — defer the cancel.
+                    deferCancelWhileLocked(sbn.key)
+                    android.util.Log.d(TAG, "Group summary while keyguard up; cancel deferred to unlock: ${sbn.key}")
+                } else {
+                    suppressSystemNotification(sbn.key) // adds to suppressedKeys + cancels with retry
+                }
             }
             // Group summaries are never added to the island — stop processing here.
             pendingRemovals.remove(sbn.key)?.cancel()
@@ -198,9 +242,14 @@ class SmartIslandNotificationListenerService : NotificationListenerService() {
                     currentSettings.deviceType
                 )
                 if (shouldBeIslandOnly(notification, modeQuick)) {
-                    markSuppressed(sbn.key)
-                    runCatchingLogged(TAG, "Immediate cancel failed") { cancelNotification(sbn.key) }
-                    android.util.Log.d(TAG, "Immediate island-only suppress: ${sbn.key}")
+                    if (shouldDeferCancelWhileLocked()) {
+                        deferCancelWhileLocked(sbn.key)
+                        android.util.Log.d(TAG, "Island-only while keyguard up; cancel deferred to unlock: ${sbn.key}")
+                    } else {
+                        markSuppressed(sbn.key)
+                        runCatchingLogged(TAG, "Immediate cancel failed") { cancelNotification(sbn.key) }
+                        android.util.Log.d(TAG, "Immediate island-only suppress: ${sbn.key}")
+                    }
                 }
             }
         } catch (e: Exception) {
@@ -254,6 +303,7 @@ class SmartIslandNotificationListenerService : NotificationListenerService() {
 
                 // Removed by posting app, user, framework timeout, or after initial suppression window.
                 android.util.Log.d(TAG, "Genuinely removed, cleaning up: ${sbn.key}")
+                lockDeferredKeys.remove(sbn.key)
                 clearSuppressed(sbn.key)
                 notificationRepository.removeNotification(sbn.key)
             }
@@ -285,6 +335,7 @@ class SmartIslandNotificationListenerService : NotificationListenerService() {
                 }
 
                 android.util.Log.d(TAG, "Removing from island repo: ${sbn.key}")
+                lockDeferredKeys.remove(sbn.key)
                 clearSuppressed(sbn.key)
                 notificationRepository.removeNotification(sbn.key)
             }
@@ -304,6 +355,13 @@ class SmartIslandNotificationListenerService : NotificationListenerService() {
                     val settings = repository.settings.first()
                     currentSettings = settings
                     if (!settings.enabled) return@runSuspendCatchingLogged
+
+                    // Safety sweep: if this is a fresh bind (process restart,
+                    // listener rebind) any stale deferred keys from a previous
+                    // incarnation cannot exist (in-memory map), but a rebind
+                    // MID-SESSION can — execute their pending cancels if the
+                    // keyguard is down already.
+                    cancelLockDeferredKeys()
 
                     val overlayReady = ensureOverlayServiceRunning()
                     val active = runCatchingLogged(TAG, "Failed to get active notifications") {
@@ -640,6 +698,13 @@ class SmartIslandNotificationListenerService : NotificationListenerService() {
      */
     private fun suppressSystemNotification(key: String) {
         if (!currentSettings.enabled || !currentSettings.hideFromNotificationShade) return
+        if (shouldDeferCancelWhileLocked()) {
+            // Keyguard up + Unread-on-Lock-Screen on: the system lock screen
+            // must present this notification natively, so postpone the
+            // island-only cancel to unlock (ACTION_USER_PRESENT sweep).
+            deferCancelWhileLocked(key)
+            return
+        }
         val activeSbn = runCatchingLogged(TAG, "Failed to get active notifications for key lookup") {
             activeNotifications.find { it.key == key }
         }
@@ -696,9 +761,105 @@ class SmartIslandNotificationListenerService : NotificationListenerService() {
         // This is an explicit user action, so the island copy must disappear as well
         // and the key must stay dismissed (see userDismissedKeys).
         markUserDismissed(key)
+        lockDeferredKeys.remove(key)
         clearSuppressed(key)
         runCatchingLogged(TAG, "forceCancel failed") { cancelNotification(key) }
         notificationRepository.removeNotification(key)
+    }
+
+    /**
+     * True when an island-bound notification's system-side cancel should be
+     * POSTPONED because the keyguard is showing: the system lock screen can
+     * then present the notification natively (the overlay window renders
+     * below the keyguard, so with an immediate cancel there was NO lock-screen
+     * presentation at all). Honors the Unread-on-Lock-Screen setting.
+     */
+    private fun shouldDeferCancelWhileLocked(): Boolean {
+        if (!currentSettings.showUnreadOnLockScreen) return false
+        val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
+            ?: return false
+        return runCatching { keyguardManager.isKeyguardLocked }.getOrDefault(false)
+    }
+
+    /**
+     * Registers a key whose island-only cancel is postponed until unlock.
+     * The island copy survives the later listener-cancel because
+     * [cancelLockDeferredKeys] re-arms markSuppressed right before firing
+     * it (keeping it inside the REASON_LISTENER_CANCEL keep-alive window).
+     */
+    private fun deferCancelWhileLocked(key: String) {
+        lockDeferredKeys[key] = SystemClock.elapsedRealtime()
+        cleanupLockDeferredKeys()
+    }
+
+    private fun cleanupLockDeferredKeys(now: Long = SystemClock.elapsedRealtime()) {
+        val cutoff = now - LOCK_DEFERRED_TTL_MS
+        lockDeferredKeys.entries.forEach { entry ->
+            if (entry.value < cutoff) {
+                lockDeferredKeys.remove(entry.key, entry.value)
+            }
+        }
+        val overflow = lockDeferredKeys.size - MAX_LOCK_DEFERRED_KEYS
+        if (overflow > 0) {
+            lockDeferredKeys.entries
+                .sortedBy { it.value }
+                .take(overflow)
+                .forEach { lockDeferredKeys.remove(it.key, it.value) }
+        }
+    }
+
+    /**
+     * Executes the deferred island-only cancels. Runs on unlock
+     * (ACTION_USER_PRESENT), when the setting is switched off mid-lock, and
+     * as a safety sweep on listener (re)connect. After this sweep the
+     * island-only model is restored: the shade copies are gone, the island
+     * keeps (or re-gains) its pills.
+     */
+    private fun cancelLockDeferredKeys() {
+        if (lockDeferredKeys.isEmpty()) return
+        if (!currentSettings.enabled || !currentSettings.hideFromNotificationShade) {
+            // Island-only mode is off: the system copies must simply stay.
+            lockDeferredKeys.clear()
+            return
+        }
+        val keys = lockDeferredKeys.keys.toList()
+        lockDeferredKeys.clear()
+        val activeKeys = runCatchingLogged(TAG, "Failed to list active notifications for unlock sweep") {
+            activeNotifications?.map { it.key }?.toSet()
+        } ?: return
+        serviceScope.launch {
+            runSuspendCatchingLogged(TAG, "Deferred lock-screen cancel failed") {
+                for (key in keys) {
+                    if (key !in activeKeys) continue
+                    // Arm the suppression window NOW so the
+                    // REASON_LISTENER_CANCEL removal that follows keeps the
+                    // island copy alive.
+                    markSuppressed(key)
+                    runCatchingLogged(TAG, "Deferred cancel failed") { cancelNotification(key) }
+                    android.util.Log.d(TAG, "Lock-deferred notification cancelled at unlock: $key")
+                }
+            }
+        }
+    }
+
+    private fun registerUserPresentReceiver() {
+        if (userPresentReceiver != null) return
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                if (intent.action == Intent.ACTION_USER_PRESENT) {
+                    cancelLockDeferredKeys()
+                }
+            }
+        }
+        runCatchingLogged(TAG, "Failed to register USER_PRESENT receiver") {
+            ContextCompat.registerReceiver(
+                this,
+                receiver,
+                IntentFilter(Intent.ACTION_USER_PRESENT),
+                ContextCompat.RECEIVER_NOT_EXPORTED
+            )
+            userPresentReceiver = receiver
+        }
     }
 
     private fun markUserDismissed(key: String) {
@@ -988,5 +1149,10 @@ class SmartIslandNotificationListenerService : NotificationListenerService() {
         // same app key shows up again.
         private const val USER_DISMISS_TOMBSTONE_TTL_MS = 30_000L
         private const val MAX_USER_DISMISSED_KEYS = 100
+        // Lock-deferred keys outlive the whole lock session (a phone can sit
+        // locked for days); the unlock sweep and the removal handler are the
+        // real cleanup paths — the TTL only bounds pathological growth.
+        private const val LOCK_DEFERRED_TTL_MS = 12 * 60 * 60 * 1000L
+        private const val MAX_LOCK_DEFERRED_KEYS = 100
     }
 }

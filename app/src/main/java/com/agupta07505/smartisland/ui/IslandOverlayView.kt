@@ -285,6 +285,14 @@ fun IslandOverlayView(
     } else {
         statusBarHeight.dp
     }) + wideYDelta
+    // PRECISION POSITION, NORMAL ISLAND (collapsed): the collapsed WIDE pill
+    // renders at window-y (idleYOffset) + this delta, so its final screen y IS
+    // the precision-tuning "vertical offset" (yOffset) itself — while the idle
+    // punch-hole pill stays at idleYOffset. Every island now follows its own
+    // sliders in every state (the "precision position is not working with the
+    // normal island" report), and the window itself still never moves, so no
+    // window-position transient can ghost the morph.
+    val collapsedWideYDelta = if (isIdle) 0.dp else wideYDelta
     val isIdleHiding = settings.hideWhenIdle && notifications.isEmpty()
 
     var isAutoHidden by remember { mutableStateOf(false) }
@@ -316,7 +324,7 @@ fun IslandOverlayView(
         if (it) expandedHeight else if (isHiding) 0.dp else effectiveHeight.dp
     }
     val yOffset by transition.animateDp(transitionSpec = { sizeSpec }, label = "islandYOffset") {
-        if (it) expandedTopOffset else 0.dp
+        if (it) expandedTopOffset else collapsedWideYDelta
     }
     val radius by transition.animateDp(transitionSpec = { sizeSpec }, label = "islandRadius") {
         if (it) 34.dp else if (isHiding) 0.dp else settings.cornerRadius.dp
@@ -445,21 +453,24 @@ fun IslandOverlayView(
     val secondaryIsPill = expanded
     val showTertiaryBubble = tertiaryNotification != null
 
+    // STATE-INDEPENDENT bubble targets: these four depend on split/hiding
+    // state, not on the transition's target state — the compose-animation lint
+    // (UnusedTransitionTargetStateParameter) rightly requires transition
+    // children to consume the target state, so they stay plain animate*AsState
+    // with the SAME matched specs as the pill's transition children.
     val secondaryAlpha by animateFloatAsState(
         targetValue = if (isSplitMode && !isHiding) 1f else 0f,
-        animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
+        animationSpec = alphaSpec,
         label = "secondaryAlpha"
     )
     val secondaryScale by animateFloatAsState(
         targetValue = if (isSplitMode && !isHiding) 1f else 0.3f,
-        animationSpec = spring(dampingRatio = 0.68f, stiffness = 480f),
+        animationSpec = sizeSpecFloat,
         label = "secondaryScale"
     )
-    val secondaryBubbleWidth by animateDpAsState(
-        targetValue = if (secondaryIsPill) miniPillWidth else circleSize,
-        animationSpec = spring(dampingRatio = 0.75f, stiffness = 520f),
-        label = "secondaryBubbleWidth"
-    )
+    val secondaryBubbleWidth by transition.animateDp(transitionSpec = { sizeSpec }, label = "secondaryBubbleWidth") {
+        if (it) miniPillWidth else circleSize
+    }
     val secondaryPillProgress = (miniPillWidth - circleSize).value.let { widthDelta ->
         if (widthDelta == 0f) {
             if (secondaryIsPill) 1f else 0f
@@ -467,33 +478,42 @@ fun IslandOverlayView(
             ((secondaryBubbleWidth - circleSize).value / widthDelta).coerceIn(0f, 1f)
         }
     }
-    val secondaryBubbleCorner by animateDpAsState(
-        targetValue = if (secondaryIsPill) settings.cornerRadius.dp else circleSize / 2f,
-        animationSpec = spring(dampingRatio = 0.75f, stiffness = 520f),
-        label = "secondaryBubbleCorner"
-    )
-    val tertiaryAlpha by animateFloatAsState(
-        targetValue = if (showTertiaryBubble && !expanded && !isHiding) 1f else 0f,
-        animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
-        label = "tertiaryAlpha"
-    )
+    val secondaryBubbleCorner by transition.animateDp(transitionSpec = { sizeSpec }, label = "secondaryBubbleCorner") {
+        if (it) settings.cornerRadius.dp else circleSize / 2f
+    }
+    val tertiaryAlpha by transition.animateFloat(transitionSpec = { alphaSpec }, label = "tertiaryAlpha") {
+        if (showTertiaryBubble && !it && !isHiding) 1f else 0f
+    }
     val tertiaryScale by animateFloatAsState(
         targetValue = if (showTertiaryBubble && !isHiding) 1f else 0.3f,
-        animationSpec = spring(dampingRatio = 0.68f, stiffness = 480f),
+        animationSpec = sizeSpecFloat,
         label = "tertiaryScale"
     )
 
     // Secondary bubble: circle right of the main pill when collapsed; when expanded
     // the next most important notification snaps to the middle (punch-hole position)
     // above the card — only that one stays visible, the others are hidden.
+    // Companion bubbles are animated INSIDE the same updateTransition as the main
+    // pill — one frame clock, one spring family (positionSpec/sizeSpec/alphaSpec
+    // are the exact specs the pill uses) — so a multi-notification collapse moves
+    // as ONE rigid group instead of N independently-sprung shapes chasing
+    // slightly different settle times. This is the coherence the info-menu-only
+    // collapse always had ("smooth with the notifications like it is when it's
+    // just the info menu").
     val collapsedSecondaryOffset = collapsedMainLeft + effectiveWidth.dp + compactGap +
         circleSize / 2f - screenCenter
     val expandedSecondaryLeft = 0.dp
-    val secondaryOffset by animateDpAsState(
-        targetValue = if (!expanded) collapsedSecondaryOffset else expandedSecondaryLeft,
-        animationSpec = spring(dampingRatio = 1f, stiffness = 520f),
-        label = "secondaryOffset"
-    )
+    val secondaryOffset by transition.animateDp(transitionSpec = { positionSpec }, label = "secondaryOffset") {
+        if (!it) collapsedSecondaryOffset else expandedSecondaryLeft
+    }
+
+    // Bubbles are SIBLINGS of the pill Box (they don't inherit its
+    // translationY), so they must carry the same collapsed wide-Y delta the
+    // pill renders with — otherwise the precision-Y slider would leave the
+    // bubbles floating at the idle band while the pill moves down.
+    val collapsedGroupY by transition.animateDp(transitionSpec = { sizeSpec }, label = "collapsedGroupY") {
+        if (!it) collapsedWideYDelta else 0.dp
+    }
 
     // Tertiary bubble: always a circle, right of the secondary circle when collapsed;
     // hidden while expanded (only the secondary stays next to the expanded card).
@@ -501,7 +521,7 @@ fun IslandOverlayView(
         circleSize + compactGap + circleSize / 2f - screenCenter
     val tertiaryOffset by animateDpAsState(
         targetValue = collapsedTertiaryOffset,
-        animationSpec = spring(dampingRatio = 1f, stiffness = 520f),
+        animationSpec = positionSpec,
         label = "tertiaryOffset"
     )
 
@@ -534,6 +554,10 @@ fun IslandOverlayView(
                     .height(effectiveHeight.dp)
                     .graphicsLayer {
                         translationX = collapsedMainOffset.toPx()
+                        // The hidden pill also sits at the collapsed wide-Y
+                        // delta when notifications are present (auto-hide);
+                        // the reveal tap target must cover THAT band.
+                        translationY = collapsedWideYDelta.toPx()
                     }
                     .pointerInput(Unit) {
                         detectTapGestures {
@@ -843,7 +867,7 @@ fun IslandOverlayView(
                     .absoluteOffset {
                         IntOffset(
                             secondaryOffset.roundToPx(),
-                            0
+                            collapsedGroupY.roundToPx()
                         )
                     }
                     .width(secondaryBubbleWidth)
@@ -913,7 +937,7 @@ fun IslandOverlayView(
                     .absoluteOffset {
                         IntOffset(
                             tertiaryOffset.roundToPx(),
-                            0
+                            collapsedGroupY.roundToPx()
                         )
                     }
                     .width(circleSize)

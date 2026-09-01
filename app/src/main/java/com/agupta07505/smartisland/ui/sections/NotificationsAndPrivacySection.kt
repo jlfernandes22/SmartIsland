@@ -296,10 +296,12 @@ fun NotificationsAndPrivacySection(
                 )
 
                 // Unread-on-lock-screen: the "missed it everywhere" fix. With
-                // island-only notifications (hide from shade on) a messaging
-                // notification that arrives while the screen is off used to be
-                // invisible until unlock; this keeps the island on the lock
-                // screen whenever unopened notifications are waiting.
+                // island-only notifications (hide from shade on), a message
+                // that arrived while the screen was off used to be cancelled
+                // from the system immediately — invisible everywhere until
+                // unlock. With this on, the cancel is paused while the
+                // keyguard is up: the lock screen shows the notification
+                // natively, and island-only hiding resumes at unlock.
                 ToggleRowItem(
                     title = stringResource(R.string.toggle_unread_lock_screen_title),
                     subtitle = stringResource(R.string.toggle_unread_lock_screen_desc),
