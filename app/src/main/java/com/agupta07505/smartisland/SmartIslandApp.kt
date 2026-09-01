@@ -8,12 +8,18 @@
 package com.agupta07505.smartisland
 
 import android.app.Application
+import com.agupta07505.smartisland.util.CrashCapture
 import dagger.hilt.android.HiltAndroidApp
 
 @HiltAndroidApp
 class SmartIslandApp : Application() {
     override fun onCreate() {
         super.onCreate()
+        // Persist the next crash to filesDir/crash-last.txt before the
+        // process dies, then chain to the system handler. This is what makes
+        // a stack-less "the app crashes" report debuggable: the stack shows
+        // up in Settings → Permissions Center as a shareable card.
+        CrashCapture.install(this)
         bypassHiddenApis()
     }
 

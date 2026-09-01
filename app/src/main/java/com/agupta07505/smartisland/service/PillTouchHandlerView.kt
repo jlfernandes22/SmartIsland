@@ -152,7 +152,8 @@ class PillTouchHandlerView(context: Context) : View(context) {
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
-        when (event.actionMasked) {
+        return try {
+            when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 pointerId = event.getPointerId(0)
                 downX = event.x
@@ -222,8 +223,22 @@ class PillTouchHandlerView(context: Context) : View(context) {
                 listener?.onTouchCancelled()
                 return true
             }
+            }
+            return super.onTouchEvent(event)
+        } catch (t: Throwable) {
+            // This view owns ALL collapsed-pill input on the no-reflection
+            // device class; a throw on the main thread would kill the process
+            // on every rebind. Fail the gesture, keep the process. (The guard
+            // wraps the body so lint still sees performClick() being called
+            // for detected taps — moving it to a helper re-breaks the a11y
+            // contract check.)
+            android.util.Log.e("PillTouchHandlerView", "onTouchEvent failed", t)
+            cancelHold()
+            pointerId = MotionEvent.INVALID_POINTER_ID
+            pendingTapValid = false
+            isDragging = false
+            return true
         }
-        return super.onTouchEvent(event)
     }
 
     private fun scheduleHold() {

@@ -18,7 +18,13 @@ inline fun <T> runCatchingLogged(tag: String, message: String = "Operation faile
         // Never swallow cancellation — doing so breaks structured concurrency
         // whenever this helper wraps suspending calls inside coroutines.
         throw e
-    } catch (e: Exception) {
+    } catch (e: Throwable) {
+        // Throwable, not Exception: reflection/Compose failures surface as
+        // Error subclasses (ExceptionInInitializerError, NoClassDefFoundError,
+        // InternalError) that used to escape every "guarded" site and kill
+        // the whole process — for an overlay service that meant a crash LOOP
+        // (every system rebind re-crashed). A service that degrades to
+        // "island missing" beats one that takes the app down with it.
         try {
             if (BuildConfig.DEBUG) {
                 Log.e(tag, message, e)
@@ -37,7 +43,8 @@ suspend inline fun <T> runSuspendCatchingLogged(
         block()
     } catch (error: CancellationException) {
         throw error
-    } catch (error: Exception) {
+    } catch (error: Throwable) {
+        // See runCatchingLogged: Errors must degrade, never crash the process.
         try {
             if (BuildConfig.DEBUG) {
                 Log.e(tag, message, error)

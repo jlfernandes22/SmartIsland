@@ -266,8 +266,11 @@ class SmartIslandNotificationListenerService : NotificationListenerService() {
                     }
                 }
             }
-        } catch (e: Exception) {
-            android.util.Log.w(TAG, "Immediate suppress exception", e)
+        } catch (t: Throwable) {
+            // Throwable (not Exception): an Error in the suppress path must
+            // cost one notification's suppression, not the listener process —
+            // a crashed listener is rebound and re-crashed by the system.
+            android.util.Log.w(TAG, "Immediate suppress error", t)
         }
 
         // Cancel any pending removal job for this key to keep island copy

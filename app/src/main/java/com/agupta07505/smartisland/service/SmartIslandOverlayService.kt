@@ -603,8 +603,11 @@ class SmartIslandOverlayService : AccessibilityService() {
             } ?: run {
                 islandView = null
             }
-        } catch (e: Exception) {
-            android.util.Log.e(TAG, "ensureCollapsedWindow fatal", e)
+        } catch (t: Throwable) {
+            // Throwable: an Error here (Compose init, reflection) must cost
+            // the island window, not the process — a crashed bind rebinds,
+            // re-crashes and locks the user out of the app entirely.
+            android.util.Log.e(TAG, "ensureCollapsedWindow fatal", t)
             islandView = null
         }
     }

@@ -418,4 +418,9 @@
     <string name="expanded_action_reply">Reply</string>
     <string name="expanded_action_mark_read">Mark as read</string>
     <string name="expanded_action_dismiss">Dismiss</string>
+    <string name="crash_card_title">Last crash detected</string>
+    <string name="crash_card_desc">The app crashed. Copy the log and send it — it pinpoints the bug.</string>
+    <string name="crash_copy">Copy log</string>
+    <string name="crash_copied">Crash log copied</string>
+    <string name="crash_dismiss">Dismiss</string>
 </resources>

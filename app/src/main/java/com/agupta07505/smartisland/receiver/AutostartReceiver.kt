@@ -43,7 +43,21 @@ class AutostartReceiver : BroadcastReceiver() {
                         "Failed handling autostart broadcast"
                     ) {
                         val settings = settingsRepository.settings.first()
-                        if (settings.enabled && ShizukuManager.hasPermission()) {
+                        // PERMISSION GRANTS PERSIST in Settings.Secure — they
+                        // never need re-applying, and the full autoGrant batch
+                        // (blocking shell inside a goAsync budget + repeated
+                        // secure-settings writes that re-arm accessibility
+                        // rebinds) must NOT run on every unlock. It previously
+                        // fired on USER_PRESENT too: the moment the Shizuku
+                        // permission existed, EVERY unlock re-ran the whole
+                        // one-tap batch — an ANR vector and a crash-loop
+                        // amplifier. Re-apply only on events that genuinely
+                        // reset state: boot (and locked boot) and package
+                        // update (restricted-settings re-freeze).
+                        val isStateReset = action == Intent.ACTION_BOOT_COMPLETED ||
+                            action == Intent.ACTION_LOCKED_BOOT_COMPLETED ||
+                            action == Intent.ACTION_MY_PACKAGE_REPLACED
+                        if (isStateReset && settings.enabled && ShizukuManager.hasPermission()) {
                             ShizukuManager.autoGrantAllPermissions(context)
                         }
                         // Re-apply the status-bar icon hiding after boot /

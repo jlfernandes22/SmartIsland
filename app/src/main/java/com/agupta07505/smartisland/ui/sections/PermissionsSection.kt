@@ -27,6 +27,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.BatteryChargingFull
+import androidx.compose.material.icons.rounded.BugReport
 import androidx.compose.material.icons.rounded.Build
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.FlashOn
@@ -43,6 +44,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -62,6 +64,7 @@ import com.agupta07505.smartisland.R
 import com.agupta07505.smartisland.data.SmartIslandSettings
 import com.agupta07505.smartisland.data.SmartIslandSettingsRepository
 import com.agupta07505.smartisland.ui.PermissionCard
+import com.agupta07505.smartisland.util.CrashCapture
 import com.agupta07505.smartisland.util.OemAutostartUtil
 import com.agupta07505.smartisland.util.ShizukuManager
 import com.agupta07505.smartisland.util.safeStartActivity
@@ -81,6 +84,11 @@ fun PermissionsSection(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    // LAST CRASH: CrashCapture persists every uncaught exception to
+    // filesDir/crash-last.txt before the process dies; if a report exists,
+    // surface it here so a stack-less "the app crashes" message becomes an
+    // actionable stack (copy → paste to the maintainer). Remains until the
+    // user dismisses it — the file outlives process restarts by design.
     var isExecutingShizuku by remember { mutableStateOf(false) }
     var isOemAutostartEnabled by remember { mutableStateOf(batteryIgnored) }
     var isOverlayWarningDisabled by remember { mutableStateOf(false) }
@@ -95,6 +103,109 @@ fun PermissionsSection(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
+        // Last-crash report card — only rendered when CrashCapture has a
+        // persisted uncaught exception. Copy puts the full stack on the
+        // clipboard; dismiss deletes the file.
+        var crashReport by remember { mutableStateOf(CrashCapture.lastCrashReport(context)) }
+        if (crashReport != null) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.35f)
+                ),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.4f)),
+                elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(20.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(42.dp)
+                                    .background(
+                                        MaterialTheme.colorScheme.error.copy(alpha = 0.15f),
+                                        shape = RoundedCornerShape(12.dp)
+                                    ),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.BugReport,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.error,
+                                    modifier = Modifier.size(24.dp)
+                                )
+                            }
+                            Column {
+                                Text(
+                                    text = stringResource(R.string.crash_card_title),
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    text = stringResource(R.string.crash_card_desc),
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                        Spacer(Modifier.width(10.dp))
+                        Button(
+                            onClick = {
+                                val report = crashReport.orEmpty()
+                                val clipboard = context.getSystemService(
+                                    android.content.Context.CLIPBOARD_SERVICE
+                                ) as? android.content.ClipboardManager
+                                clipboard?.setPrimaryClip(
+                                    android.content.ClipData.newPlainText(
+                                        "SmartIsland crash log",
+                                        report
+                                    )
+                                )
+                                Toast.makeText(
+                                    context,
+                                    context.getString(R.string.crash_copied),
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            },
+                            shape = RoundedCornerShape(12.dp),
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
+                        ) {
+                            Text(
+                                text = stringResource(R.string.crash_copy),
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                    TextButton(onClick = {
+                        CrashCapture.clear(context)
+                        crashReport = null
+                    }) {
+                        Text(
+                            text = stringResource(R.string.crash_dismiss),
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+        }
+
         // Shizuku 1-Tap Auto Setup Card
         Card(
             modifier = Modifier.fillMaxWidth(),
