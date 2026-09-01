@@ -78,8 +78,21 @@ class LockScreenMirrorNotifier(private val context: Context) {
         )
     }
 
-    private val notificationManager =
+    // ROUND-Y ROOT-CAUSE FIX (the crash loop, finally): this used to be an
+    // EAGER property initializer — context.getSystemService(...) ran at
+    // CONSTRUCTION TIME. The listener constructs this notifier as a field
+    // initializer, and field initializers run during the service CONSTRUCTOR
+    // — BEFORE the framework's service.attach() installs the base Context.
+    // ContextWrapper.getSystemService then delegates to a NULL base and
+    // throws exactly "NullPointerException: Attempt to invoke virtual method
+    // 'java.lang.Object.getSystemService(java.lang.String)' on a null
+    // object reference", killing the process on every single listener bind
+    // ("Unable to create service") — the loop on the OnePlus CPH2581 since
+    // the lock-screen-mirror feature shipped. lazy defers the lookup to the
+    // first use, which happens inside onCreate — safely post-attach.
+    private val notificationManager: NotificationManager? by lazy {
         context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+    }
 
     private fun logD(message: String) {
         runCatching { if (Log.isLoggable(TAG, Log.DEBUG) || BuildConfig.DEBUG) Log.d(TAG, message) }

@@ -107,6 +107,14 @@ object CrashCapture {
             val msg = runCatching { root.message }.getOrNull()
             if (!msg.isNullOrBlank()) append(": ").append(msg.take(300))
         }
+        // ROUND-Y: the root cause's TOP FRAMES go into the header too — the
+        // CPH2581 reports kept arriving as flattened screenshots whose OCR
+        // truncated the stack body; with the throw site up top, one
+        // screenshot is enough to localize a crash.
+        val rootFrames = runCatching { root.stackTrace }.getOrNull()
+            ?.take(8)
+            ?.joinToString("  |  ") { it.toString() }
+            .orEmpty()
         val header = buildString {
             append("SmartIsland crash")
             append(" — ").append(
@@ -122,6 +130,9 @@ object CrashCapture {
                 append("last heartbeat: ").append(it.replace("|", " @ ")).append('\n')
             }
             append("root cause: ").append(rootLine).append('\n')
+            if (rootFrames.isNotEmpty()) {
+                append("root frames: ").append(rootFrames).append('\n')
+            }
             append('\n')
         }
         // ROUND-X: full cause chain, reconstructed explicitly — the live

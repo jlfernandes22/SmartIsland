@@ -99,7 +99,16 @@ class SmartIslandNotificationListenerService : NotificationListenerService() {
     // those unread island notifications as silent SmartIsland notifications
     // so the system lock screen presents them; unlock cancels the mirrors
     // and restores the island-only model.
-    private val lockScreenMirror = LockScreenMirrorNotifier(this)
+    // ROUND-Y ROOT-CAUSE FIX: this was an eager field initializer
+    // (`LockScreenMirrorNotifier(this)`), which ran during the service
+    // CONSTRUCTOR — before the framework attached the base Context. The
+    // notifier's own getSystemService initializer then hit a null base and
+    // NPE'd on every bind (the crash loop). by lazy defers BOTH this
+    // construction and any context-dependent work inside the notifier to
+    // the first access — which happens in onCreate, safely post-attach.
+    private val lockScreenMirror: LockScreenMirrorNotifier by lazy {
+        LockScreenMirrorNotifier(this)
+    }
     private var userPresentReceiver: BroadcastReceiver? = null
     @Volatile private var currentSettings = SmartIslandSettings.Default
     private val coroutineExceptionHandler = CoroutineExceptionHandler { _, error ->
