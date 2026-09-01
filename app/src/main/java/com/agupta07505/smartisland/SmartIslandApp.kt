@@ -31,8 +31,12 @@ class SmartIslandApp : Application() {
     override fun onCreate() {
         super.onCreate()
         // (Idempotent — attachBaseContext already installed it; kept here so
-        // a future refactor of attachBaseContext cannot silently un-arm it.)
+        // a future refactor of attachBaseContext cannot silently un-arm it.
+        // Round W: also detects a foreign default-handler swap and re-chains
+        // ours on top — the live device showed deaths with no persisted
+        // stack, and a silent handler replacement is one possible cause.)
         CrashCapture.install(this)
+        CrashCapture.ensureInstalled(this)
         CrashGuard.recordHeartbeat(this, "app-create")
         // Read the system's own death ledger (native crashes, ANRs, system
         // kills — everything the UncaughtExceptionHandler can never see) and

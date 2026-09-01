@@ -181,6 +181,7 @@ fun SafeModeScreen(
                     runCatching {
                         CrashCapture.clear(context)
                         ExitInfoRecorder.acknowledgeAndClear(context)
+                        CrashGuard.clearEvidence(context)
                     }
                     evidence = null
                 },

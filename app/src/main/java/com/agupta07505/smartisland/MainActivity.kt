@@ -14,21 +14,19 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import com.agupta07505.smartisland.data.INotificationRepository
-import com.agupta07505.smartisland.data.SmartIslandSettingsRepository
+import com.agupta07505.smartisland.di.SmartIslandRepositories
 import com.agupta07505.smartisland.ui.SafeModeScreen
 import com.agupta07505.smartisland.ui.SmartIslandHomeScreen
 import com.agupta07505.smartisland.ui.SmartIslandTheme
+import com.agupta07505.smartisland.util.CrashCapture
 import com.agupta07505.smartisland.util.CrashGuard
+import com.agupta07505.smartisland.util.SmartIslandRepositories
 import com.agupta07505.smartisland.util.SystemServiceRecovery
 import com.agupta07505.smartisland.util.runCatchingLogged
 import dagger.hilt.android.AndroidEntryPoint
-import javax.inject.Inject
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
-    @Inject lateinit var settingsRepository: SmartIslandSettingsRepository
-    @Inject lateinit var notificationRepository: INotificationRepository
 
     private val bluetoothPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -53,11 +51,39 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
+        // Round W: the live device kept dying between app-create and the
+        // activity-create heartbeat — i.e. INSIDE super.onCreate (Hilt
+        // member injection + ComponentActivity restore) — with the uncaught
+        // handler never persisting a stack. The boundary itself now captures:
+        // a throw here is recorded, latches the loop breaker, and the
+        // activity finishes cleanly so the NEXT launch opens the safe-mode
+        // evidence screen instead of looping.
+        try {
+            super.onCreate(savedInstanceState)
+        } catch (t: Throwable) {
+            CrashGuard.recordBoundaryCrash(this, "activity-super-onCreate", t)
+            finish()
+            return
+        }
+        CrashCapture.ensureInstalled(this)
         // Everything below runs BEFORE the first frame can render — a throw
         // here was invisible (no UI, and previously no persisted trace of
         // what died). Each site degrades instead of crashing.
         CrashGuard.recordHeartbeat(this, "activity-create")
+        // Repository resolution is no longer Hilt field injection (which
+        // threw uncatchably inside super.onCreate on the live device): it
+        // is resolved explicitly, guarded, and the home screen already has
+        // null-tolerant fallbacks for both dependencies.
+        val settingsRepository = runCatching {
+            SmartIslandRepositories.settingsRepository(this)
+        }.onFailure {
+            CrashGuard.recordBoundaryCrash(this, "resolve-settings-repository", it)
+        }.getOrNull()
+        val notificationRepository = runCatching {
+            SmartIslandRepositories.notificationRepository(this)
+        }.onFailure {
+            CrashGuard.recordBoundaryCrash(this, "resolve-notification-repository", it)
+        }.getOrNull()
         runCatchingLogged(TAG, "SystemServiceRecovery failed") {
             SystemServiceRecovery.requestRecovery(this)
         }

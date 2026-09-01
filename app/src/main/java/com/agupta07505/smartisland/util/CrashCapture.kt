@@ -35,11 +35,15 @@ import java.util.Locale
 object CrashCapture {
 
     private const val FILE_NAME = "crash-last.txt"
+    private const val HANDLER_MARKER = "crash-handler-ran.txt"
 
     @Volatile private var installed = false
 
+    /** Our live handler instance, kept so re-assertion can detect swaps. */
+    @Volatile private var ourHandler: Thread.UncaughtExceptionHandler? = null
+
     fun install(context: Context) {
-        if (installed) return
+        if (installed && ourHandler != null) return
         installed = true
         // Deliberately NOT context.applicationContext: install() runs from
         // Application.attachBaseContext, before the Application object is
@@ -48,7 +52,7 @@ object CrashCapture {
         // directly and safely at every call site.
         val appContext = context
         val previous = Thread.getDefaultUncaughtExceptionHandler()
-        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+        val handler = Thread.UncaughtExceptionHandler { thread, throwable ->
             try {
                 // Latch crash-loop safe mode FIRST (rolling crash-times list):
                 // even if the report write below fails on a wedged filesystem,
@@ -68,6 +72,27 @@ object CrashCapture {
                 // And never mask a failing previous handler either: at this
                 // point the runtime is dying anyway; die quietly.
             }
+        }
+        ourHandler = handler
+        Thread.setDefaultUncaughtExceptionHandler(handler)
+    }
+
+    /**
+     * Round W: re-asserts that OUR handler is still the process default.
+     * The live device produced system-ledger REASON_CRASH deaths with NO
+     * persisted Java stack — one possible cause is a later-installed
+     * component silently REPLACING the default handler (ours never runs,
+     * no crash-last.txt). Called from app-create and activity-create; if a
+     * swap is detected we re-chain on top of whoever swapped us.
+     */
+    fun ensureInstalled(context: Context) {
+        if (ourHandler == null) {
+            install(context)
+            return
+        }
+        val current = Thread.getDefaultUncaughtExceptionHandler()
+        if (current !== ourHandler) {
+            install(context) // chains on top of the current (foreign) handler
         }
     }
 
@@ -93,6 +118,24 @@ object CrashCapture {
             .getOrDefault(throwable.toString())
         file.parentFile?.mkdirs()
         file.writeText(header + stack)
+        // Belt-and-braces: if private storage is the sick organ on this
+        // device (the live loop showed REASON_CRASH deaths with NO stack),
+        // an external-files-dir copy may still land.
+        runCatching {
+            context.getExternalFilesDir(null)?.let { dir ->
+                File(dir, FILE_NAME).writeText(header + stack)
+            }
+        }
+        // Handler-ran marker: proves the uncaught handler executed for this
+        // death even when every report write failed. Its ABSENCE on a
+        // device is itself the diagnosis (handler never ran).
+        runCatching {
+            File(context.filesDir, HANDLER_MARKER).writeText(
+                "handler ran — " +
+                    SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date()) +
+                    " — thread " + thread.name + "\n"
+            )
+        }
     }
 
     /** The persisted crash report, or null when the app has not crashed. */
@@ -105,5 +148,11 @@ object CrashCapture {
     /** User-visible acknowledgment ("Dismiss" in the crash card). */
     fun clear(context: Context) {
         runCatching { File(context.filesDir, FILE_NAME).delete() }
+        runCatching { File(context.filesDir, HANDLER_MARKER).delete() }
+        runCatching {
+            context.getExternalFilesDir(null)?.let { dir ->
+                File(dir, FILE_NAME).delete()
+            }
+        }
     }
 }

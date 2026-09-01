@@ -48,6 +48,7 @@ object CrashGuard {
     private const val HEARTBEAT_FILE = "heartbeat.txt"
     private const val CRASH_TIMES_FILE = "crash-times.txt"
     private const val SAFE_MODE_FILE = "safe-mode.flag"
+    private const val BOUNDARY_FILE = "boundary-crash.txt"
 
     /** Rolling window in which 2+ crashes latch safe mode. */
     private const val SAFE_MODE_WINDOW_MS = 15 * 60 * 1000L
@@ -120,6 +121,40 @@ object CrashGuard {
         }
     }
 
+    /**
+     * Persisted evidence for a crash we caught AT A BOUNDARY (around
+     * super.onCreate, around repository resolution, around any framework
+     * call we refuse to let kill the process). Round W: the live device
+     * (OnePlus CPH2581, SDK 37) kept dying between app-create and
+     * activity-create WITHOUT the uncaught handler ever persisting a Java
+     * stack — so the boundaries themselves now capture what dies inside
+     * them. Written to filesDir AND external files dir: if private storage
+     * is the sick organ, the external copy still lands.
+     */
+    fun recordBoundaryCrash(context: Context, where: String, throwable: Throwable) {
+        runCatching {
+            val header = buildString {
+                append("Boundary crash caught at: ").append(where)
+                append(" — ").append(formatTime(System.currentTimeMillis()))
+                append(" — thread ").append(Thread.currentThread().name)
+                append('\n')
+                lastHeartbeatRecord(context)?.let {
+                    append("last heartbeat: ").append(it.replace("|", " @ ")).append('\n')
+                }
+                append('\n')
+            }
+            val stack = android.util.Log.getStackTraceString(throwable)
+            File(context.filesDir, BOUNDARY_FILE)
+                .writeText(header + stack)
+            context.getExternalFilesDir(null)?.let { dir ->
+                runCatching { File(dir, BOUNDARY_FILE).writeText(header + stack) }
+            }
+        }
+        // A boundary catch IS a crash for the loop breaker: two of these in
+        // the window must latch safe mode exactly like an uncaught one.
+        markCrash(context, "boundary:$where")
+    }
+
     /** True while the crash-loop breaker is engaged. */
     fun isSafeMode(context: Context): Boolean {
         return runCatching {
@@ -157,9 +192,22 @@ object CrashGuard {
     /** Merges both evidence sources + safe-mode state into one card text. */
     fun buildLaunchCrashReport(context: Context): String? {
         val parts = mutableListOf<String>()
+        File(context.filesDir, BOUNDARY_FILE)
+            .takeIf { it.exists() }
+            ?.let { runCatching { it.readText() }.getOrNull() }
+            ?.takeIf { it.isNotBlank() }
+            ?.let { parts.add(it) }
         ExitInfoRecorder.lastReport(context)?.let { parts.add(it) }
         CrashCapture.lastCrashReport(context)?.let { parts.add(it) }
         if (parts.isEmpty()) return null
         return parts.joinToString("\n\n———\n\n")
+    }
+
+    /** User-visible acknowledgment — drops the boundary evidence too. */
+    fun clearEvidence(context: Context) {
+        runCatching { File(context.filesDir, BOUNDARY_FILE).delete() }
+        context.getExternalFilesDir(null)?.let { dir ->
+            runCatching { File(dir, BOUNDARY_FILE).delete() }
+        }
     }
 }
