@@ -135,6 +135,7 @@ object ExitInfoRecorder {
     }
 
     /** The system-attached tombstone/ANR trace, capped to keep the card readable. */
+    @RequiresApi(Build.VERSION_CODES.R)
     private fun readTrace(record: ApplicationExitInfo): String? {
         return runCatching {
             val stream = record.traceInputStream ?: return@runCatching null
