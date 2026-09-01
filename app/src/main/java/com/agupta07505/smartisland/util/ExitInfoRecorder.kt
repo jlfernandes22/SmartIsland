@@ -118,7 +118,7 @@ object ExitInfoRecorder {
                 append("description: ").append(it).append('\n')
             }
             CrashGuard.lastHeartbeatRecord(context)?.let {
-                append("last heartbeat: ").append(it.replace('|', " @ ")).append('\n')
+                append("last heartbeat: ").append(it.replace("|", " @ ")).append('\n')
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 readTrace(record)?.let { trace ->

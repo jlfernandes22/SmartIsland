@@ -85,7 +85,7 @@ object CrashCapture {
             append('\n')
             append("thread: ").append(thread.name).append('\n')
             CrashGuard.lastHeartbeatRecord(context)?.let {
-                append("last heartbeat: ").append(it.replace('|', " @ ")).append('\n')
+                append("last heartbeat: ").append(it.replace("|", " @ ")).append('\n')
             }
             append('\n')
         }
