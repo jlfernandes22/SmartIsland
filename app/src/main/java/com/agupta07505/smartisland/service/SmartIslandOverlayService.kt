@@ -56,7 +56,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
@@ -84,6 +85,10 @@ class SmartIslandOverlayService : AccessibilityService() {
     // stays visible during in-menu toggles (e.g. the Bluetooth QS tile tap).
     @Volatile private var suppressShadeHide: Boolean = false
     private var collapseJob: kotlinx.coroutines.Job? = null
+    // ROUND AH: bumped on every lock/wake event; part of the combined flag-sync
+    // collector so wake/unlock re-converges the window-flag layer from the
+    // ViewModel's live truth even after a missed emission around Doze.
+    private val windowSyncTick = MutableStateFlow(0)
     private var lastParams: WindowManager.LayoutParams? = null
     // TWO-WINDOW ARCHITECTURE (no-reflection devices): the content window
     // above is MATCH_PARENT in every state and NEVER resizes; while collapsed
@@ -158,27 +163,35 @@ class SmartIslandOverlayService : AccessibilityService() {
                         overlayOwners.resume()
                         isLockScreenActive = keyguardManager?.isKeyguardLocked == true
                         isShadeOpen = false
-                        updateWindowLayoutParams(
-                            isWindowExpanded,
-                            viewModel.settings.value
-                        )
+                        // ROUND AH: wake used to only re-apply the cached
+                        // isWindowExpanded flag. Around Doze that cache and the
+                        // flag-sync collectors can go stale (missed emissions,
+                        // swallowed binder failures), which is exactly the
+                        // "tap the little island = collapse" regression after
+                        // sleep. syncWindowFlags() re-converges the whole flag
+                        // layer from the ViewModel's live truth.
+                        syncWindowFlags()
+                        // Re-arm the combined collector too: it re-runs the
+                        // same idempotent sync from the ViewModel's truth.
+                        windowSyncTick.value += 1
+                        // The keyguard can settle a few hundred ms AFTER
+                        // screen-on (fingerprint teardown, OEM keyguards), so
+                        // the unlocked direction now gets the same spaced
+                        // re-reads the locked direction already had.
+                        scheduleLockStateRechecks()
                     }
                     Intent.ACTION_SCREEN_OFF -> {
                         overlayOwners.pause()
                         isLockScreenActive = true
                         isShadeOpen = false
-                        updateWindowLayoutParams(
-                            isWindowExpanded,
-                            viewModel.settings.value
-                        )
+                        syncWindowFlags()
+                        windowSyncTick.value += 1
                         scheduleLockStateRechecks()
                     }
                     Intent.ACTION_USER_PRESENT -> {
                         isLockScreenActive = false
-                        updateWindowLayoutParams(
-                            isWindowExpanded,
-                            viewModel.settings.value
-                        )
+                        syncWindowFlags()
+                        windowSyncTick.value += 1
                     }
                 }
             }
@@ -203,9 +216,12 @@ class SmartIslandOverlayService : AccessibilityService() {
         lockStateRecheckJob = serviceScope.launch {
             runSuspendCatchingLogged(TAG, "Lock-state recheck failed") {
                 kotlinx.coroutines.delay(500)
-                updateWindowLayoutParams(isWindowExpanded, viewModel.settings.value)
+                // ROUND AH: rechecks now go through the self-healing sync —
+                // a converged keyguard state also re-asserts the window flags
+                // (and the pill touch-catcher) from the ViewModel's live truth.
+                syncWindowFlags()
                 kotlinx.coroutines.delay(1000)
-                updateWindowLayoutParams(isWindowExpanded, viewModel.settings.value)
+                syncWindowFlags()
             }
         }
     }
@@ -236,7 +252,10 @@ class SmartIslandOverlayService : AccessibilityService() {
                 val locked = keyguardManager?.isKeyguardLocked == true
                 if (isLockScreenActive != locked) {
                     isLockScreenActive = locked
-                    updateWindowLayoutParams(isWindowExpanded, viewModel.settings.value)
+                    // ROUND AH: full self-healing sync instead of a raw flag
+                    // re-apply — lock changes now also re-converge the window
+                    // flags from Compose truth (Doze-divergence insurance).
+                    syncWindowFlags()
                 }
             }
 
@@ -319,7 +338,7 @@ class SmartIslandOverlayService : AccessibilityService() {
         // Wrapped: a throw here would make Android disable the service automatically.
         runCatchingLogged(TAG, "onConfigurationChanged failed") {
             if (destroyed || !::viewModel.isInitialized) return@runCatchingLogged
-            updateWindowLayoutParams(isWindowExpanded, viewModel.settings.value)
+            syncWindowFlags()
         }
     }
 
@@ -453,66 +472,32 @@ class SmartIslandOverlayService : AccessibilityService() {
         }
 
         serviceScope.launch {
-            runSuspendCatchingLogged(TAG, "Expanded-state collector failed") {
-                viewModel.expanded.collectLatest { expanded ->
-                    if (destroyed || !viewModel.settings.value.enabled) {
-                        return@collectLatest
-                    }
-                    collapseJob?.cancel()
-                    if (expanded) {
-                        isWindowExpanded = true
-                        // Two-window architecture: expanding only flips the
-                        // content window's touch flags and removes the (always
-                        // transparent) pill touch-catcher. The window frame
-                        // itself never changes size, so there is nothing to
-                        // mask and nothing that can ghost.
-                        updateWindowLayoutParams(true, viewModel.settings.value)
-                        // Pre-bind the Shizuku user service while the menu is
-                        // opening so the first hotspot tap dispatches
-                        // immediately instead of paying the cold-start bind
-                        // latency (fire-and-forget; the toggle rebinds on
-                        // demand if this never completes).
-                        if (viewModel.notifications.value.isEmpty()) {
-                            serviceScope.launch {
-                                runSuspendCatchingLogged(TAG, "Tethering service warmup failed") {
-                                    ShizukuManager.warmUpTetheringUserService()
-                                }
-                            }
-                        }
-                    } else {
-                        collapseJob = serviceScope.launch {
-                            kotlinx.coroutines.delay(AUTO_COLLAPSE_DELAY_MS)
-                            isWindowExpanded = false
-                            // Same flag-only swap, delayed until the collapse
-                            // springs are visually settled: the morph plays out
-                            // entirely inside the stable full-screen window and
-                            // the touch handover afterwards is invisible.
-                            updateWindowLayoutParams(false, viewModel.settings.value)
+            runSuspendCatchingLogged(TAG, "Window-flag sync collector failed") {
+                // ROUND AH: the expanded / notifications / input-active
+                // collectors used to drive the window-flag layer independently
+                // and only on their own changes. Around Doze any single missed
+                // emission — or one swallowed binder exception silently
+                // completing the collect — left the flag layer permanently
+                // desynced from the Compose truth. The pill touch-catcher then
+                // survived into the expanded state, and every tap on the little
+                // island (parked on the pill's home spot) read as a plain pill
+                // tap = toggle = collapse. One combined collector now re-syncs
+                // the flag layer on ANY relevant change, and windowSyncTick
+                // lets lock/wake events force the same re-convergence. The
+                // per-tick guard keeps one transient throw from killing the
+                // collector for the rest of the process lifetime.
+                combine(
+                    viewModel.expanded,
+                    viewModel.notifications,
+                    viewModel.isInputActive,
+                    viewModel.settings,
+                    windowSyncTick
+                ) { _, _, _, _, _ -> }
+                    .collect {
+                        runCatchingLogged(TAG, "Window-flag sync tick failed") {
+                            syncWindowFlags()
                         }
                     }
-                }
-            }
-        }
-
-        serviceScope.launch {
-            runSuspendCatchingLogged(TAG, "Notifications-state collector failed") {
-                viewModel.notifications.collectLatest {
-                    if (destroyed || !viewModel.settings.value.enabled) {
-                        return@collectLatest
-                    }
-                    updateWindowLayoutParams(isWindowExpanded, viewModel.settings.value)
-                }
-            }
-        }
-
-        serviceScope.launch {
-            runSuspendCatchingLogged(TAG, "Input-active collector failed") {
-                viewModel.isInputActive.collectLatest {
-                    if (destroyed || !viewModel.settings.value.enabled) {
-                        return@collectLatest
-                    }
-                    updateWindowLayoutParams(isWindowExpanded, viewModel.settings.value)
-                }
             }
         }
     }
@@ -681,7 +666,9 @@ class SmartIslandOverlayService : AccessibilityService() {
         if (destroyed || !::windowManager.isInitialized || !::viewModel.isInitialized) return
         ensureForegroundStarted()
         ensureCollapsedWindow()
-        updateWindowLayoutParams(isWindowExpanded, settings)
+        // ROUND AH: self-healing sync (ensureCollapsedWindow's lock guard may
+        // have collapsed a re-created session — sync from the live truth).
+        syncWindowFlags()
     }
 
     private fun stopOverlaySession() {
@@ -916,7 +903,7 @@ class SmartIslandOverlayService : AccessibilityService() {
                         // is a pure invisible flag/child-window swap.
                         serviceScope.launch {
                             runSuspendCatchingLogged(TAG, "TouchableRegion window sync failed") {
-                                updateWindowLayoutParams(isWindowExpanded, viewModel.settings.value)
+                                syncWindowFlags()
                             }
                         }
                     }
@@ -942,6 +929,57 @@ class SmartIslandOverlayService : AccessibilityService() {
         } ?: run {
             isTouchableRegionSupported = false
             android.util.Log.w(TAG, "Touchable region reflection unsupported or blocked, falling back to physical bounds")
+        }
+    }
+
+    /**
+     * ROUND AH: the single, self-healing entry point for the window-flag
+     * layer. Every collector, broadcast and event that used to call
+     * updateWindowLayoutParams with the CACHED isWindowExpanded now goes
+     * through here: the ViewModel's live expanded state is the single source
+     * of truth, the cached field converges to it, and the pill touch-catcher
+     * is re-evaluated on every pass. Idempotent and cheap when settled (the
+     * layout update dedups unchanged params).
+     */
+    private fun syncWindowFlags() {
+        if (destroyed || !::viewModel.isInitialized) return
+        val truth = viewModel.expanded.value
+        if (truth) {
+            // Expanded (or re-asserting expansion): a pending collapse
+            // handover must not fire after the expanded flags are applied.
+            collapseJob?.cancel()
+            collapseJob = null
+            val wasExpanded = isWindowExpanded
+            isWindowExpanded = true
+            updateWindowLayoutParams(true, viewModel.settings.value)
+            if (!wasExpanded && viewModel.notifications.value.isEmpty()) {
+                // Pre-bind the Shizuku user service while the menu is opening
+                // so the first hotspot tap dispatches immediately instead of
+                // paying the cold-start bind latency (moved from the old
+                // expanded-only collector).
+                serviceScope.launch {
+                    runSuspendCatchingLogged(TAG, "Tethering service warmup failed") {
+                        ShizukuManager.warmUpTetheringUserService()
+                    }
+                }
+            }
+        } else if (collapseJob?.isActive == true) {
+            // Collapse handover already scheduled (the post-morph flag swap);
+            // re-syncs during the morph window must not reset its timer.
+        } else if (isWindowExpanded) {
+            // First collapse observation — or a handover job lost to a Doze
+            // divergence. (Re)scheduling the delayed swap heals both: the
+            // morph plays out in the stable full-screen window and the flags
+            // converge to collapsed afterwards.
+            collapseJob = serviceScope.launch {
+                delay(AUTO_COLLAPSE_DELAY_MS)
+                isWindowExpanded = false
+                updateWindowLayoutParams(false, viewModel.settings.value)
+            }
+        } else {
+            // Settled collapsed: re-assert (publishes the real keyguard state,
+            // visibility, and re-syncs the catcher's geometry/bounds).
+            updateWindowLayoutParams(false, viewModel.settings.value)
         }
     }
 
@@ -1108,7 +1146,16 @@ class SmartIslandOverlayService : AccessibilityService() {
             removePillTouchWindow()
             return
         }
+        // ROUND AH: the catcher must NEVER exist while the Compose island is
+        // expanded — its footprint IS the little island's resting spot, so a
+        // stale catcher turns every little-island tap into a plain pill tap
+        // (= toggle = collapse). Compose truth outranks the expanded flag
+        // param here: the two can diverge around Doze (missed emissions,
+        // lost collectors), which is exactly the "tapping the small island
+        // collapses the card after sleep" regression.
+        val composeExpanded = ::viewModel.isInitialized && viewModel.expanded.value
         val needed = !expanded &&
+            !composeExpanded &&
             !contentHidden &&
             !suppressShadeHide &&
             !isTouchableRegionSupported
@@ -1180,15 +1227,26 @@ class SmartIslandOverlayService : AccessibilityService() {
 
     private fun removePillTouchWindow() {
         val view = pillTouchView ?: return
-        pillTouchView = null
-        pillTouchParams = null
-        // A removal mid-gesture also kills the drag: settle the pill back.
-        springPillDragBack()
-        if (!::windowManager.isInitialized) return
+        // ROUND AH: CONFIRM-THEN-FORGET. The handle used to be dropped BEFORE
+        // the removal ran, so one transient binder failure (Doze-era
+        // transaction timeouts) leaked an INVISIBLE catcher window whose
+        // footprint is the little island's resting spot — every tap there
+        // then toggled (= collapsed) the expanded card until the process
+        // died, and no later sync could ever retry the removal. Keeping the
+        // handle on failure lets the next syncWindowFlags() pass retry it.
+        var removed = false
         runCatchingLogged(TAG, "Failed to remove pill touch-catcher window") {
+            removed = !view.isAttachedToWindow
             if (view.isAttachedToWindow) {
                 windowManager.removeViewImmediate(view)
+                removed = true
             }
+        }
+        if (removed) {
+            pillTouchView = null
+            pillTouchParams = null
+            // A removal mid-gesture also kills the drag: settle the pill back.
+            springPillDragBack()
         }
     }
 
@@ -1205,6 +1263,10 @@ class SmartIslandOverlayService : AccessibilityService() {
             // While the pill is UI-hidden (auto-hide / hide-when-idle) only
             // reveal-taps matter; the invisible pill must not chase drags.
             if (viewModel.isPillUiHidden.value) return
+            // ROUND AH: the catcher must not exist while expanded; if a stale
+            // one is still receiving gestures, its drags must never move the
+            // expanded CARD (pillDragOffsetPx is added to the card's Y too).
+            if (viewModel.expanded.value) return
             val maxPx = PILL_DRAG_MAX_DP * resources.displayMetrics.density
             viewModel.pillDragOffsetPx.value = totalDyPx.coerceIn(-maxPx, maxPx)
         }
@@ -1256,6 +1318,33 @@ class SmartIslandOverlayService : AccessibilityService() {
         downX: Float,
         downY: Float
     ) {
+        // ROUND AH GHOST-CATCHER GUARD: the catcher must not exist while the
+        // Compose island is expanded. If a Doze race left one behind, its
+        // footprint IS the little island's resting spot and a tap there used
+        // to fall through to the plain pill tap action = toggle = collapse
+        // ("goes back to the problem where it collapses the bigger island
+        // instead of switching to the other small island"). Compose truth
+        // decides the tap's meaning: switch to the little island's
+        // notification — and the stale catcher plus any flag divergence are
+        // healed on the spot (the next tap takes the healthy router path).
+        if (::viewModel.isInitialized && viewModel.expanded.value) {
+            if (!viewModel.isPillUiHidden.value) {
+                val list = viewModel.visibleNotifications.value
+                val current = list.getOrNull(viewModel.selectedIndex.value)
+                val secondary = list.firstOrNull { it.key != current?.key }
+                val index = secondary?.let { s -> list.indexOfFirst { it.key == s.key } } ?: -1
+                if (index >= 0) {
+                    viewModel.setSelectedNotificationIndex(index)
+                }
+            }
+            viewModel.pillDragOffsetPx.value = 0f
+            serviceScope.launch {
+                runSuspendCatchingLogged(TAG, "Stale-catcher heal failed") {
+                    syncWindowFlags()
+                }
+            }
+            return
+        }
         val view = pillTouchView
         val settings = viewModel.settings.value
         val density = resources.displayMetrics.density
