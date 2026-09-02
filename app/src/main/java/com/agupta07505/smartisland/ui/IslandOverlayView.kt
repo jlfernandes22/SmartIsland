@@ -932,7 +932,12 @@ fun IslandOverlayView(
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .wrapContentHeight()
+                        // align = Top (wrapContentHeight's default is
+                        // CenterVertically): whenever the animated card height
+                        // is a frame larger than the content column (the shrink
+                        // tail of a big→small page change) the column must stay
+                        // pinned to the card's top edge, not float centered.
+                        .wrapContentHeight(align = Alignment.Top)
                         .graphicsLayer {
                             alpha = expandedAlpha
                             scaleX = contentScale

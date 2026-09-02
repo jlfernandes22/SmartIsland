@@ -93,7 +93,12 @@ fun IslandExpandedContent(
         Box(
             modifier = modifier
                 .fillMaxWidth()
-                .wrapContentHeight(unbounded = true)
+                // align = Top: wrapContentHeight's DEFAULT align is
+                // CenterVertically, which would drift this content vertically
+                // whenever the animated card height differs from its natural
+                // height (morph, tile-toggle resize). Pin to the card top;
+                // overflow stays below the clip.
+                .wrapContentHeight(align = Alignment.Top, unbounded = true)
                 .onSizeChanged {
                     val measuredHeight = with(density) { it.height.toDp() }
                     if (measuredHeight > 0.dp) {
@@ -347,8 +352,25 @@ fun IslandExpandedContent(
                     // resizes can never re-derive its scroll offsets under a
                     // live finger, so the pager physically cannot stall.
                     .requiredWidth(expandedWidth)
-                    // unbounded = true: pages measure at natural height even when parent Box has explicit height
-                    .wrapContentHeight(unbounded = true)
+                    // unbounded = true: pages measure at natural height even when
+                    // the parent Box has an explicit height. align = Top is NOT
+                    // optional — wrapContentHeight's DEFAULT align is
+                    // CenterVertically (androidx Size.kt), so whenever ANY
+                    // composed page was taller than the lerped card height (the
+                    // 175dp music page is still composed while the card settles
+                    // on the ~125dp battery page) the whole pager was pulled UP
+                    // by half the excess and the card clipped the content's TOP:
+                    // the "content is cut, then snaps into place ~1s later"
+                    // report — the snap was the tall neighbor page being disposed
+                    // after settle, collapsing the pager back to the current
+                    // page's height. That is also why the bug was asymmetric
+                    // (big→small clipped, small→big clean): growing only shifts
+                    // for a masked instant at gesture start. Top-aligned, the
+                    // overflow extends DOWNWARD where the card already clips,
+                    // so content position no longer depends on which pages are
+                    // composed — the top edges of pager and card truly coincide
+                    // (the intent this modifier always claimed).
+                    .wrapContentHeight(align = Alignment.Top, unbounded = true)
                     // Center the fixed viewport over the (possibly narrower)
                     // card: the viewport center, the card center and the
                     // settled page center are then ALWAYS the same point — the
@@ -570,7 +592,9 @@ private fun EmptyExpanded(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .wrapContentHeight(unbounded = true)
+            // align = Top (default is CenterVertically): keep the launcher grid
+            // pinned to the card top for any transient card-height mismatch.
+            .wrapContentHeight(align = Alignment.Top, unbounded = true)
             .padding(start = 18.dp, top = 16.dp, end = 18.dp, bottom = 12.dp),
         verticalArrangement = Arrangement.Center
     ) {
