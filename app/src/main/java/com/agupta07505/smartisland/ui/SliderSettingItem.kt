@@ -37,6 +37,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.sp
 
 @Composable
@@ -60,11 +61,21 @@ fun SliderSettingItem(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
+            // WEIGHTED label: the "[−] value [+]" stepper must never be
+            // pushed out of the card by a long title. The worst offender was
+            // "Wide Island Vertical (Y) Offset" — the label ate the whole row
+            // width and the trailing + button ended up clipped outside the
+            // card, invisible and untappable. The label now takes exactly the
+            // space left over after the fixed-width stepper cluster and wraps
+            // (max 2 lines, then ellipsis) instead of displacing it.
             Text(
                 text = label,
                 style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurface
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.weight(1f).padding(end = 6.dp),
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
             )
             Row(
                 verticalAlignment = Alignment.CenterVertically,

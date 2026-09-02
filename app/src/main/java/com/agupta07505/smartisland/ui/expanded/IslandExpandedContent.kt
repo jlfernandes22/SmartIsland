@@ -181,12 +181,23 @@ fun IslandExpandedContent(
     }
 
     // Tell the caller whether the info menu page is the one being displayed,
-    // so overlay taps on it don't open the selected notification's app.
-    LaunchedEffect(pagerState.currentPage) {
-        onInfoPageActive(showInfoPage && pagerState.currentPage == infoPageIndex)
-    }
-    LaunchedEffect(Unit) {
-        onInfoPageActive(showInfoPage && pagerState.currentPage == infoPageIndex)
+    // so overlay taps on it don't open the selected notification's app — and
+    // so the card width follows the pager at DRAG BOUNDARIES only. The gate
+    // on isScrollInProgress matters: the pager flips currentPage at the swipe
+    // midpoint, and flipping the card width exactly there animates the pager's
+    // viewport under an active finger (the slow-swipe "freeze then snap").
+    // With the gate the width flips when a drag STARTS (offset still ~0, no
+    // gesture math fighting the change) and when a scroll fully SETTLES:
+    //   - settled on the info menu -> active -> content-hugging card width
+    //   - any drag/scroll in progress -> inactive -> full-width card, stable
+    //     viewport for the whole swipe
+    //   - settled on a notification page -> inactive -> full width
+    LaunchedEffect(pagerState.currentPage, pagerState.isScrollInProgress) {
+        onInfoPageActive(
+            showInfoPage &&
+                pagerState.currentPage == infoPageIndex &&
+                !pagerState.isScrollInProgress
+        )
     }
 
     val bottomPadding = 16.dp

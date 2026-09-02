@@ -13,6 +13,7 @@ import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateDp
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.updateTransition
 import androidx.compose.foundation.background
@@ -321,16 +322,35 @@ fun IslandOverlayView(
 
     val isHiding = isIdleHiding || (settings.autoHidePill && isAutoHidden)
 
-    val width by transition.animateDp(transitionSpec = { sizeSpec }, label = "islandWidth") {
+    // Morph targets: the size springs (sizeSpec/heightSpec) are reserved for
+    // the expanded<->collapsed MORPH (initialState != targetState). When the
+    // transition STAYS expanded and only the width/height TARGET changes — the
+    // info-menu card switching between its content-hugging width and the
+    // 0.95-screen-wide card, or the per-frame pager height interpolation —
+    // the value must SNAP. Spring-chasing a retargeted width while the user
+    // is mid-swipe animates the pager's viewport width UNDER THE FINGER: the
+    // pager's pixel-offset math re-derives against a page size that changes
+    // every frame, the page visually stalls ("freezes ~0.5s") and only snaps
+    // into place after the spring settles. A snap happens in one frame at a
+    // drag boundary, where the offset is ~0 and no gesture math is fighting it.
+    val width by transition.animateDp(transitionSpec = {
+        if (initialState == targetState) snap() else sizeSpec
+    }, label = "islandWidth") {
         if (it) expandedCardWidth else if (isHiding) 0.dp else effectiveWidth.dp
     }
-    val height by transition.animateDp(transitionSpec = { heightSpec }, label = "islandHeight") {
+    val height by transition.animateDp(transitionSpec = {
+        if (initialState == targetState) snap() else heightSpec
+    }, label = "islandHeight") {
         if (it) expandedHeight else if (isHiding) 0.dp else effectiveHeight.dp
     }
-    val yOffset by transition.animateDp(transitionSpec = { sizeSpec }, label = "islandYOffset") {
+    val yOffset by transition.animateDp(transitionSpec = {
+        if (initialState == targetState) snap() else sizeSpec
+    }, label = "islandYOffset") {
         if (it) expandedTopOffset else collapsedWideYDelta
     }
-    val radius by transition.animateDp(transitionSpec = { sizeSpec }, label = "islandRadius") {
+    val radius by transition.animateDp(transitionSpec = {
+        if (initialState == targetState) snap() else sizeSpec
+    }, label = "islandRadius") {
         if (it) 34.dp else if (isHiding) 0.dp else settings.cornerRadius.dp
     }
     // IDLE SHADOW: the tiny cutout-sized idle pill floats on the wallpaper,
