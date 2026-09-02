@@ -49,6 +49,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
@@ -585,8 +586,16 @@ fun IslandOverlayView(
     )
 
     // Secondary bubble: circle right of the main pill when collapsed; when expanded
-    // the next most important notification snaps to the middle (punch-hole position)
-    // above the card — only that one stays visible, the others are hidden.
+    // it becomes the LITTLE ISLAND — a full mini-pill rendered at the main pill's
+    // HOME position (same X and Y the collapsed pill rests at). ROUND AF: it used
+    // to float at the punch-hole band above the card, so a swipe-up collapse slid
+    // the shrinking card UNDER it ("the big island goes under the little island
+    // instead of morphing into it"). With the little island parked on the pill's
+    // home spot, the collapse morph lands the card EXACTLY on it — the card
+    // becomes the little island, and the little island slides aside to rejoin as
+    // the companion circle. The card's expanded top offset already reserves
+    // circleSize+gap of clearance above the card, so the little island at home
+    // never overlaps the expanded card in any slider configuration.
     // Companion bubbles are animated INSIDE the same updateTransition as the main
     // pill — one frame clock, one spring family (positionSpec/sizeSpec/alphaSpec
     // are the exact specs the pill uses) — so a multi-notification collapse moves
@@ -596,22 +605,21 @@ fun IslandOverlayView(
     // just the info menu").
     val collapsedSecondaryOffset = collapsedMainLeft + effectiveWidth.dp + compactGap +
         circleSize / 2f - screenCenter
-    val expandedSecondaryLeft = 0.dp
+    // The secondary's expanded target: the pill's home X (screen-anchored, same
+    // value the pill's translationX uses when collapsed — the window is always
+    // centered so the same offset lands the little island dead-on the pill's
+    // resting center).
+    val expandedSecondaryLeft = collapsedMainOffset
     val secondaryOffset by transition.animateDp(transitionSpec = { positionSpec }, label = "secondaryOffset") {
         if (!it) collapsedSecondaryOffset else expandedSecondaryLeft
     }
 
     // Bubbles are SIBLINGS of the pill Box (they don't inherit its
-    // translationY), so they must carry the same collapsed wide-Y delta the
-    // pill renders with — otherwise the precision-Y slider would leave the
-    // bubbles floating at the idle band while the pill moves down.
-    val collapsedGroupY by transition.animateDp(transitionSpec = { sizeSpec }, label = "collapsedGroupY") {
-        // Bubbles are siblings of the pill Box, so they carry the full
-        // window-local Y themselves: windowTopBase + the collapsed wide-Y
-        // delta when collapsed, windowTopBase when expanded (the old
-        // window-local 0 — the window no longer starts at idleYOffset).
-        if (!it) windowTopBase + collapsedWideYDelta else windowTopBase
-    }
+    // translationY), so they carry the full window-local Y themselves:
+    // windowTopBase + the collapsed wide-Y delta — which is now the group's Y in
+    // EVERY state (ROUND AF: the little island's expanded home IS the pill's
+    // resting band), so this is a constant, not a transition child anymore.
+    val collapsedGroupY = windowTopBase + collapsedWideYDelta
 
     // Tertiary bubble: always a circle, right of the secondary circle when collapsed;
     // hidden while expanded (only the secondary stays next to the expanded card).
@@ -676,6 +684,16 @@ fun IslandOverlayView(
         // Inner Box: The actual visible pill container, managing the black background shape and size animations
         Box(
             modifier = Modifier
+                // ROUND AF: draw the pill/card ABOVE the companion bubbles. The
+                // little island (secondary pill) now sits on the pill's home
+                // spot while expanded, and the collapse morph lands the card
+                // exactly there — the card must paint OVER the departing little
+                // island so it reads as morphing INTO it (the little island
+                // emerges from beneath the arriving card and slides aside to
+                // rejoin as the companion circle). Draw order used to put the
+                // bubbles on top, which is what made the card vanish UNDER the
+                // little island.
+                .zIndex(1f)
                 .width(safeWidth)
                 .height(safeHeight)
                 .graphicsLayer {
@@ -870,11 +888,26 @@ fun IslandOverlayView(
                         holdJob.cancel()
                         if (dragOffset != 0f) {
                             if (firedSwipeAction) {
-                                // A swipe fired collapse/dismiss/etc: snap to
-                                // rest so the transition (window resize +
-                                // width spring + content crossfade) runs from
-                                // a settled pill with nothing else moving.
-                                dragOffset = 0f
+                                // A swipe fired collapse/dismiss/etc: GLIDE the
+                                // card the rest of the way to rest (critically
+                                // damped, no bounce) instead of teleporting it.
+                                // The old instant snap made the card jump BACK
+                                // down from the finger before the collapse morph
+                                // ran; with the glide, a swipe-up reads as one
+                                // continuous motion — the card follows the finger
+                                // and then completes the trip INTO the little
+                                // island, exactly where the morph lands it.
+                                scope.launch {
+                                    androidx.compose.animation.core.Animatable(dragOffset).animateTo(
+                                        targetValue = 0f,
+                                        animationSpec = spring(
+                                            dampingRatio = 1f,
+                                            stiffness = 1000f
+                                        )
+                                    ) {
+                                        dragOffset = value
+                                    }
+                                }
                             } else {
                                 // Cancelled drag (below threshold, gesture
                                 // consumed elsewhere, pointer lost): keep the
