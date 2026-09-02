@@ -22,6 +22,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.ui.input.pointer.changedToUp
 import androidx.compose.ui.input.pointer.positionChange
 import kotlin.math.abs
@@ -631,16 +632,84 @@ fun IslandOverlayView(
         label = "tertiaryOffset"
     )
 
+    // ROUND AG: little-island tap geometry for the outer tap router below.
+    // Captured per recomposition into rememberUpdatedState because plain vals
+    // (secondaryIndex, circleSize, …) would be frozen at their first value
+    // inside the pointerInput(Unit) closure — the same stale-capture trap the
+    // current* fields above guard against — while delegated animation state
+    // (secondaryOffset, secondaryBubbleWidth) would stay live. Reading ALL of
+    // them here, during composition, keeps the target rect always current.
+    val currentOnPageSelected by rememberUpdatedState(onPageSelected)
+    val currentSecondaryIndex by rememberUpdatedState(secondaryIndex)
+    val littleIslandTapTarget: LittleIslandTapTarget? =
+        if (expanded && secondaryNotification != null && secondaryIndex >= 0) {
+            LittleIslandTapTarget(
+                centerXOffset = secondaryOffset,
+                top = collapsedGroupY,
+                width = secondaryBubbleWidth,
+                height = circleSize
+            )
+        } else {
+            null
+        }
+    val currentLittleIslandTapTarget by rememberUpdatedState(littleIslandTapTarget)
+
     // Outer Box: Fills the entire WindowManager window bounds (which are padded for easy touch)
     val outerModifier = if (currentExpanded) {
         modifier
             .fillMaxSize()
             .pointerInput(Unit) {
-                detectTapGestures {
-                    if (currentIsInputActive) {
-                        onReplyStateChanged(false)
+                // ROUND AG: manual tap routing (was detectTapGestures → toggle).
+                // The little island (the companion mini-pill parked on the
+                // pill's home spot while expanded) and this full-bleed
+                // tap-to-collapse layer share one window. On real devices the
+                // collapse kept winning over the bubble's own clickable
+                // ("tapping the small island above the big one just collapses
+                // the island instead of switching places") — verified against
+                // the androidx source, a child clickable that receives the
+                // down WOULD immunize this layer (awaitFirstDown defaults to
+                // requireUnconsumed=true), so on the affected devices the tap
+                // simply never reaches the bubble's hit bounds. Taps are now
+                // routed GEOMETRICALLY at gesture time instead of relying on
+                // hit-testing: inside the little island's band → switch places
+                // (select that notification, the pager scrolls and the two
+                // swap contents); anywhere else outside the card → collapse.
+                // Child handlers that consumed the down/up (the bubble's own
+                // clickable, the card's gesture handler, pager clickables)
+                // are skipped, so nothing ever double-fires.
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    val downConsumedByChild = down.isConsumed
+                    val up = waitForUpOrCancellation()
+                    if (up == null || up.isConsumed || downConsumedByChild) {
+                        return@awaitEachGesture
                     }
-                    currentOnToggle()
+                    val tapTarget = currentLittleIslandTapTarget
+                    var handledAsSwitch = false
+                    if (tapTarget != null) {
+                        val slopPx = 8.dp.toPx()
+                        val centerX = size.width / 2f + tapTarget.centerXOffset.toPx()
+                        val halfWidth = tapTarget.width.toPx() / 2f + slopPx
+                        val top = tapTarget.top.toPx() - slopPx
+                        val bottom = tapTarget.top.toPx() + tapTarget.height.toPx() + slopPx
+                        val x = up.position.x
+                        val y = up.position.y
+                        if (x >= centerX - halfWidth && x <= centerX + halfWidth &&
+                            y >= top && y <= bottom
+                        ) {
+                            if (currentIsInputActive) {
+                                onReplyStateChanged(false)
+                            }
+                            currentOnPageSelected(currentSecondaryIndex)
+                            handledAsSwitch = true
+                        }
+                    }
+                    if (!handledAsSwitch) {
+                        if (currentIsInputActive) {
+                            onReplyStateChanged(false)
+                        }
+                        currentOnToggle()
+                    }
                 }
             }
     } else {
@@ -1259,6 +1328,18 @@ private fun triggerHapticVibration(context: android.content.Context) {
         }
     }
 }
+
+// ROUND AG: little-island tap geometry for the expanded outer tap router
+// (see IslandOverlayView). Coordinates are WINDOW coordinates matching the
+// bubble's absoluteOffset + TopCenter placement: the bubble's center sits at
+// windowCenter + centerXOffset (the window is full-bleed and horizontally
+// centered), its top edge at `top`.
+private data class LittleIslandTapTarget(
+    val centerXOffset: Dp,
+    val top: Dp,
+    val width: Dp,
+    val height: Dp
+)
 
 internal enum class CompactNotificationShape { MiniPill, Circle }
 

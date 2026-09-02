@@ -171,6 +171,7 @@ class SmartIslandOverlayService : AccessibilityService() {
                             isWindowExpanded,
                             viewModel.settings.value
                         )
+                        scheduleLockStateRechecks()
                     }
                     Intent.ACTION_USER_PRESENT -> {
                         isLockScreenActive = false
@@ -180,6 +181,31 @@ class SmartIslandOverlayService : AccessibilityService() {
                         )
                     }
                 }
+            }
+        }
+    }
+
+    // ROUND AG: SCREEN_OFF optimistically assumes locked=true (the privacy-
+    // safe direction), but the real keyguard state can settle later —
+    // unsecured/swipe-none devices never show a keyguard (isKeyguardLocked
+    // stays false and USER_PRESENT may NEVER fire, leaving the island stuck
+    // hidden on the home screen = "not respecting the settings"), and some
+    // OEMs raise the keyguard slightly after the screen-off broadcast.
+    // Two spaced re-reads of the REAL keyguard state (via
+    // updateWindowLayoutParams, which also re-applies visibility, the forced
+    // collapse and the touch-catcher) converge reality to the setting after
+    // every screen-off.
+    private var lockStateRecheckJob: kotlinx.coroutines.Job? = null
+
+    private fun scheduleLockStateRechecks() {
+        if (destroyed || !::viewModel.isInitialized) return
+        lockStateRecheckJob?.cancel()
+        lockStateRecheckJob = serviceScope.launch {
+            runSuspendCatchingLogged(TAG, "Lock-state recheck failed") {
+                kotlinx.coroutines.delay(500)
+                updateWindowLayoutParams(isWindowExpanded, viewModel.settings.value)
+                kotlinx.coroutines.delay(1000)
+                updateWindowLayoutParams(isWindowExpanded, viewModel.settings.value)
             }
         }
     }
@@ -197,7 +223,15 @@ class SmartIslandOverlayService : AccessibilityService() {
             // progress bars, ...) that previously triggered it on every tick.
             // Lock/unlock on content-only changes is already covered by the
             // SCREEN_ON / SCREEN_OFF / USER_PRESENT receiver above.
-            if (event?.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            // ROUND AG: TYPE_WINDOWS_CHANGED is subscribed too (see the
+            // accessibility config) — some OEM keyguards announce themselves
+            // only through window-list changes, which used to leave the lock
+            // state stale until the next screen toggle ("lockscreen detection
+            // does not work properly"). Windows-changed events are rare
+            // (window add/remove/title), so the extra binder call is cheap.
+            val isWindowTransition = event?.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
+                event?.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED
+            if (isWindowTransition) {
                 val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
                 val locked = keyguardManager?.isKeyguardLocked == true
                 if (isLockScreenActive != locked) {
@@ -693,6 +727,12 @@ class SmartIslandOverlayService : AccessibilityService() {
                 val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
                 val isLocked = keyguardManager?.isKeyguardLocked == true
                 isLockScreenActive = isLocked
+                // ROUND AG: a re-created window must never come back expanded
+                // under an active keyguard (same guard as
+                // updateWindowLayoutParams — fingerprint/lock-screen safety).
+                if (isLocked && viewModel.expanded.value) {
+                    viewModel.collapse()
+                }
                 val isLandscape = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
                 // LOCK SCREEN UNREAD: even when the island is hidden on the
                 // lock screen, unopened notifications must still surface there
@@ -773,8 +813,18 @@ class SmartIslandOverlayService : AccessibilityService() {
                         setTouchableInsetsMethod.invoke(insets, TOUCHABLE_INSETS_REGION)
                         val region = touchableRegionField.get(insets) as android.graphics.Region
                         region.setEmpty()
-                    } else if (isExpanded) {
-                        // When expanded, let the entire frame intercept touches so clicking outside collapses it
+                    } else if (isExpanded && !isLockScreenActive) {
+                        // When expanded, let the entire frame intercept touches so clicking outside collapses it.
+                        // ROUND AG: NEVER while the keyguard is up — a full-frame
+                        // touchable region on the lock screen covers the
+                        // fingerprint sensor's touch area (the sensor needs the
+                        // TAP to reach SystemUI) and blocks every lock-screen
+                        // interaction. Locking force-collapses the island in
+                        // updateWindowLayoutParams; this is the belt-and-braces
+                        // guard for any transient expanded-on-lockscreen state:
+                        // while locked the region falls through to the pill-only
+                        // computation below, so the keyguard gets every touch
+                        // outside the pill band.
                         setTouchableInsetsMethod.invoke(insets, TOUCHABLE_INSETS_FRAME)
                     } else {
                         // PILL-ONLY TOUCHABLE REGION:
@@ -903,6 +953,21 @@ class SmartIslandOverlayService : AccessibilityService() {
         val isLocked = keyguardManager?.isKeyguardLocked == true
         isLockScreenActive = isLocked
         viewModel.isLocked.value = isLocked
+
+        // ROUND AG LOCKSCREEN GUARD: an expanded card while the keyguard is up
+        // leaves a FULL-SCREEN touchable overlay floating over the lock screen
+        // (the expanded insets are TOUCHABLE_INSETS_FRAME), which eats the
+        // fingerprint sensor's touch area and violates both lock-screen
+        // settings (showOnLockScreen / lockScreenPrivacy redaction is only
+        // wired for the pill). Locking therefore always collapses: the
+        // unread-mirror VISIBILITY below still follows the settings, the
+        // fingerprint area stays free, and the user can re-expand after
+        // unlocking. The expanded-state collector re-applies the collapsed
+        // window flags and the pill touch-catcher on the next frame.
+        if (isLocked && viewModel.expanded.value) {
+            viewModel.collapse()
+            return
+        }
         
         val isLandscape = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
         // LOCK SCREEN UNREAD: even when the island is hidden on the lock
