@@ -1394,9 +1394,14 @@ class SmartIslandOverlayService : AccessibilityService() {
      * with both the cutout and the touch-catcher again.
      */
     private fun WindowManager.LayoutParams.allowIntoDisplayCutout(): WindowManager.LayoutParams {
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
             layoutInDisplayCutoutMode =
                 WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+        } else if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+            // Same value as ALWAYS (1); the constant was renamed in API 30.
+            @Suppress("DEPRECATION")
+            layoutInDisplayCutoutMode =
+                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
         }
         return this
     }
