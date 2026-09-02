@@ -131,6 +131,14 @@ fun IslandOverlayView(
     val scope = rememberCoroutineScope()
     var dragOffset by remember { mutableStateOf(0f) }
     var infoPageActive by remember { mutableStateOf(false) }
+    // LIVE CARD WIDTH from the expanded pager (null until the pager reports).
+    // The pager interpolates the card width between page widths with its own
+    // swipe fraction (info menu hugs its tile row, notification pages use the
+    // 0.95-screen band) — the island therefore morphs WITH the gesture instead
+    // of waiting for the pager to settle before flipping between two fixed
+    // sizes (the old settle-gated behavior users read as "the width changes
+    // 0.5-1s after the content").
+    var pagerCardWidth by remember { mutableStateOf<Dp?>(null) }
 
     val context = LocalContext.current
     val displayMetrics = context.resources.displayMetrics
@@ -164,12 +172,10 @@ fun IslandOverlayView(
         dampingRatio = 1f,
         stiffness = 520f
     )
-    // SHORT size spring (~0.12s, no overshoot) for expanded-domain retargets
-    // that happen with NO gesture in flight — the info-menu width flip only
-    // fires when the pager gate reports the menu active, i.e. the scroll has
-    // fully settled, so a brief shrink reads as a deliberate hug instead of
-    // a one-frame pop. NEVER used while a pager drag can be live (that path
-    // snaps, see the width animation below).
+    // SHORT size spring (~0.12s, no overshoot) for the expanded-domain HEIGHT
+    // target: the per-frame pager interpolation (see the comment at the
+    // width/height animations) is tracked with ~1 frame of smoothing — no
+    // laggy chase, and discrete measurement corrections land without a jump.
     val quickSizeSpec = spring<androidx.compose.ui.unit.Dp>(
         dampingRatio = 1f,
         stiffness = 1400f
@@ -189,19 +195,29 @@ fun IslandOverlayView(
     //
     // CONTENT-SIZED CARD (idle info): when the expanded state IS the idle info
     // menu, the card also wraps its content horizontally — a 4-tile grid is
-    // ~232dp wide, not the 0.95-screen-width band the other pages use. The
-    // width target, the height estimate and the width handed to the content
-    // all derive from idleInfoMenuWidthDp so all three stay consistent.
-    // With notifications active the menu lives at pager page 0; while that
-    // page is the one on screen the card sizes to the menu too — the old
-    // notifications.isEmpty() gate kept the menu at full width whenever any
-    // notification existed.
+    // ~232dp wide, not the 0.95-screen-width band the other pages use.
+    //
+    // With notifications active the menu lives at pager page 0 and the width
+    // is FRACTION-DRIVEN (pagerCardWidth): it interpolates menu <-> wide with
+    // the swipe, so the card is already the right size when a page lands — no
+    // settle wait, no post-settle morph. The static values below are only the
+    // pre-first-report fallback (and the whole story when notifications are
+    // empty, where the menu IS the card and no pager exists).
     val isIdleInfoExpand = settings.idleTapMode == SmartIslandSettings.IdleTapModes.INFO &&
         (notifications.isEmpty() || infoPageActive)
-    val expandedCardWidth = if (isIdleInfoExpand) {
+    val staticExpandedCardWidth = if (isIdleInfoExpand) {
         idleInfoMenuWidthDp(settings)
     } else {
         expandedWidth
+    }
+    val expandedCardWidth = when {
+        notifications.isEmpty() -> staticExpandedCardWidth
+        // Pager alive: the reported fraction-driven width is authoritative.
+        // Before the very first report (one frame) fall back to the static
+        // estimate — wide, because expansion always lands on a notification
+        // page (the menu is only reached by swiping/dots).
+        pagerCardWidth != null -> pagerCardWidth!!
+        else -> staticExpandedCardWidth
     }
     val initialEstimatedHeight = remember(
         activeMode,
@@ -336,41 +352,48 @@ fun IslandOverlayView(
     // androidx's Transition re-evaluates transitionSpec() against its current
     // SEGMENT, and the segment only changes when the transition's STATE
     // changes (Transition.updateTarget: `if (currentTargetState != targetState)`).
-    // The width/height targets flip between the content-hugging info-menu
-    // size and the 0.95-screen size while the transition STAYS on expanded
+    // The width/height targets change while the transition STAYS on expanded
     // (a same-state target-value retarget), so the segment remains
     // (false -> true) from the last real state change and any
     // `initialState == targetState` spec branch is evaluated against STALE
-    // states — the intended snap never fired and every flip spring-animated
-    // for ~0.5s: that animated the pager's viewport width UNDER THE FINGER
-    // (the mid-swipe "freeze then snap") and made entering the info menu
-    // take ~1s (full pager settle + the width spring on top).
+    // states — that dead branch is what kept Rounds AB/AC fixing a symptom
+    // instead of the mechanism.
     //
     // animateDpAsState instead re-reads its spec from composition on EVERY
-    // retarget, so the spec chosen below is always the intended one:
-    //   - pill <-> expanded MORPH (morphing) -> the playful springs, and
-    //     every collapsed-domain change keeps them too (slider drags, hide)
-    //   - flip to the info-menu width while expanded -> quickSizeSpec: this
-    //     flip only happens when the pager gate reports the menu active,
-    //     i.e. !isScrollInProgress, so no gesture can fight the resize
-    //   - flip to the wide card while expanded -> snap() in ONE frame: this
-    //     happens at drag START, where a live gesture makes ANY multi-frame
-    //     viewport resize stall the pager's offset math (the original freeze)
-    //   - per-frame pager height interpolation -> quickSizeSpec tracks the
-    //     interpolated target with ~1 frame of smoothing and never jumps
-    //     when a first real measurement lands mid-morph-tail
+    // retarget, so the spec chosen below is always the intended one.
+    //
+    // ROUND AD ARCHITECTURE (the actual freeze/lag fix): the pager's viewport
+    // is a FIXED-width layer (requiredWidth in IslandExpandedContent) and the
+    // card clips a centered window of it. The pager therefore reports its
+    // per-frame geometry (targetWidth/targetHeight lerped by the swipe
+    // fraction) and the card size tracks it:
+    //   - expanded, not morphing -> snap(): the per-frame targets already ARE
+    //     the animation (the pager's own drag/settle motion). Snapping makes
+    //     the card follow the gesture exactly — one frame behind at most —
+    //     with no spring that could keep moving after the finger stopped.
+    //     A viewport that never resizes means this can never stall a swipe.
+    //   - pill <-> expanded MORPH (morphing) and everything collapsed-domain
+    //     -> the playful springs, unchanged.
+    // The height keeps quickSizeSpec in the expanded domain: a stiff spring
+    // (~1 frame of smoothing) that tracks the same per-frame targets but
+    // absorbs discrete measurement corrections (first real measure landing
+    // mid-morph-tail) without a visible jump.
     var wasExpanded by remember { mutableStateOf(expanded) }
     val morphing = expanded != wasExpanded
-    LaunchedEffect(expanded) { wasExpanded = expanded }
+    LaunchedEffect(expanded) {
+        wasExpanded = expanded
+        // Drop the pager's last reported width on collapse: the pager state
+        // itself is recreated on the next expansion (initialPage = current
+        // selection), so a stale "menu width" from a previous session on the
+        // info page would otherwise make the morph start toward the wrong
+        // width for a frame before the first fresh report snaps it back.
+        if (!expanded) pagerCardWidth = null
+    }
     val widthTarget = if (expanded) expandedCardWidth else if (isHiding) 0.dp else effectiveWidth.dp
     val heightTarget = if (expanded) expandedHeight else if (isHiding) 0.dp else effectiveHeight.dp
     val width by animateDpAsState(
         targetValue = widthTarget,
-        animationSpec = when {
-            morphing || !expanded -> sizeSpec
-            isIdleInfoExpand -> quickSizeSpec
-            else -> snap()
-        },
+        animationSpec = if (morphing || !expanded) sizeSpec else snap(),
         label = "islandWidth"
     )
     val height by animateDpAsState(
@@ -926,11 +949,18 @@ fun IslandOverlayView(
                         onLaunchApp = onLaunchApp,
                         onCollapse = onToggleExpanded,
                         statusBarHeight = statusBarHeight.dp,
-                        expandedWidth = expandedCardWidth,
+                        // The FIXED pager viewport width (0.95 screen), NOT
+                        // the animated card width: the pager must lay out
+                        // identically on every frame so its drag math can
+                        // never be disturbed; the card size is reported back
+                        // from the pager geometry instead.
+                        expandedWidth = expandedWidth,
                         // Each mode owns its natural height. The launcher already
                         // supplies its own loading height and must not impose that
                         // minimum on compact call or battery content.
                         onHeightMeasured = { expandedHeight = it },
+                        // Fraction-driven card width (see pagerCardWidth above).
+                        onWidthTarget = { pagerCardWidth = it },
                         settings = settings,
                         onReplyStateChanged = onReplyStateChanged,
                         onOpenIdleInfoItem = onOpenIdleInfoItem,

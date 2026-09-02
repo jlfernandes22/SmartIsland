@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.requiredWidth
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.pager.HorizontalPager
@@ -66,12 +67,20 @@ fun IslandExpandedContent(
     onLaunchApp: (String) -> Unit,
     onCollapse: () -> Unit,
     statusBarHeight: Dp,
-    // Width the expanded card lays out at (0.95 screen width, computed by
-    // IslandOverlayView). Needed so the info-menu page height can be
-    // ESTIMATED exactly (same formula as the IslandOverlayView height
-    // estimate) before the menu's first real measurement arrives.
+    // FIXED pager viewport width: the 0.95-screen-width band every
+    // notification page lays out at, computed once by IslandOverlayView.
+    // The pager's viewport NEVER resizes — not with the card, not with a
+    // gesture — so no layout change can ever stall the pager's drag math
+    // (the old mid-swipe "freeze then snap"). The CARD size is instead
+    // DERIVED from the pager geometry: the per-frame lerp below reports the
+    // interpolated width via onWidthTarget and height via onHeightMeasured,
+    // so the island hugs whichever page is under it while the swipe runs.
+    // The info-menu page lays its content out at idleInfoMenuWidthDp inside
+    // this wide viewport (centered), so its measurement is width-independent
+    // and byte-exact with the IslandOverlayView height estimate.
     expandedWidth: Dp,
     onHeightMeasured: (Dp) -> Unit,
+    onWidthTarget: (Dp) -> Unit = {},
     settings: SmartIslandSettings,
     modifier: Modifier = Modifier,
     onReplyStateChanged: (Boolean) -> Unit = {},
@@ -116,18 +125,24 @@ fun IslandExpandedContent(
     val pagerOffset = if (showInfoPage) 1 else 0
     val pageCount = notifications.size + pagerOffset
     // Seeded with the SAME deterministic estimate IslandOverlayView uses for
-    // its height spring target (idleInfoMenuHeightDp). The previous null
-    // seed made the first frames report the 135dp generic fallback, so the
-    // card opened tall and then shrank to the real ~60dp menu height after
-    // the first measurement — the "content shifts up after the page settles"
-    // symptom. Estimate == measurement ⇒ the height spring never retargets.
-    // Re-seeds when the card width changes (the info page can now be shown at
-    // the content-sized menu width while notifications exist too).
-    var infoPageHeight by remember(expandedWidth) {
+    // its height target (idleInfoMenuHeightDp) — but computed for the MENU
+    // width, because the info page now always lays its content out at
+    // idleInfoMenuWidthDp inside the fixed wide viewport (width-independent
+    // measurement). The previous null seed made the first frames report the
+    // 135dp generic fallback, so the card opened tall and then shrank to the
+    // real ~60dp menu height after the first measurement. Estimate ==
+    // measurement ⇒ the height never retargets. Re-seeds when the tile set
+    // changes (that is what can alter the menu's natural size).
+    var infoPageHeight by remember(
+        settings.idleInfoShowTime,
+        settings.idleInfoShowDate,
+        settings.idleInfoShowBattery,
+        settings.idleInfoShowBluetooth
+    ) {
         mutableStateOf(
             com.agupta07505.smartisland.ui.expanded.idleInfoMenuHeightDp(
                 settings,
-                expandedWidth.value - 24f
+                com.agupta07505.smartisland.ui.expanded.idleInfoMenuWidthDp(settings).value - 24f
             )
         )
     }
@@ -183,18 +198,16 @@ fun IslandExpandedContent(
         }
     }
 
-    // Tell the caller whether the info menu page is the one being displayed,
-    // so overlay taps on it don't open the selected notification's app — and
-    // so the card width follows the pager at DRAG BOUNDARIES only. The gate
-    // on isScrollInProgress matters: the pager flips currentPage at the swipe
-    // midpoint, and flipping the card width exactly there animates the pager's
-    // viewport under an active finger (the slow-swipe "freeze then snap").
-    // With the gate the width flips when a drag STARTS (offset still ~0, no
-    // gesture math fighting the change) and when a scroll fully SETTLES:
-    //   - settled on the info menu -> active -> content-hugging card width
-    //   - any drag/scroll in progress -> inactive -> full-width card, stable
-    //     viewport for the whole swipe
-    //   - settled on a notification page -> inactive -> full width
+    // Tell the caller whether the pager is SETTLED on the info menu page, so
+    // overlay taps on it don't open the selected notification's app (and the
+    // collapsed re-seed logic can treat the menu as the active page).
+    // IMPORTANT: this no longer drives the CARD SIZE. Sizing used to wait for
+    // !isScrollInProgress — i.e. the card kept the previous page's width for
+    // the whole drag AND settle (~0.5-1s) and only then morphed, which is
+    // exactly the "information is already there but the width changes late"
+    // report. The card size is now fraction-driven (see the lerp below), so
+    // this gate only routes TAPS; the isScrollInProgress term just stops a
+    // mid-fling frame from being misread as a settled tap.
     LaunchedEffect(pagerState.currentPage, pagerState.isScrollInProgress) {
         onInfoPageActive(
             showInfoPage &&
@@ -257,18 +270,52 @@ fun IslandExpandedContent(
             (currentPageHeight + (nextHeight - currentPageHeight) * fraction).coerceIn(72.dp, 250.dp)
         }
 
-        LaunchedEffect(targetHeight) {
+        // PER-FRAME CARD WIDTH — the height lerp's twin. Every page owns a
+        // natural width (the info menu hugs its tile row, every notification
+        // page uses the 0.95-screen band); the card width interpolates between
+        // them with the same swipe fraction. Because the pager viewport is a
+        // FIXED width (requiredWidth below), retargeting the card every frame
+        // can no longer touch the pager's layout — the island simply clips a
+        // centered window of the stable pager, which is the iOS-style morph:
+        // entering the info menu narrows the card DURING the swipe (no more
+        // full-settle wait before the shrink), leaving it widens the card
+        // while the finger moves, and same-size page pairs (battery <->
+        // music) interpolate to a constant width just like before.
+        fun pageWidthFor(page: Int): Dp =
+            if (showInfoPage && page == infoPageIndex) {
+                com.agupta07505.smartisland.ui.expanded.idleInfoMenuWidthDp(settings)
+            } else {
+                expandedWidth
+            }
+
+        val targetWidth = run {
+            val nextWidthPage = if (offsetFraction > 0f) {
+                (currentPage + 1).coerceAtMost(pageCount - 1)
+            } else if (offsetFraction < 0f) {
+                (currentPage - 1).coerceAtLeast(0)
+            } else {
+                currentPage
+            }
+            val currentWidth = pageWidthFor(currentPage)
+            val nextWidth = pageWidthFor(nextWidthPage)
+            val fraction = kotlin.math.abs(offsetFraction)
+            currentWidth + (nextWidth - currentWidth) * fraction
+        }
+
+        // One relaunch reports both axes; the parent snaps its card size to
+        // these per-frame targets (the interpolation itself is the animation).
+        LaunchedEffect(targetWidth, targetHeight) {
+            onWidthTarget(targetWidth)
             onHeightMeasured(targetHeight)
         }
 
         // SNAPPIER SETTLE: the stock snap spring (StiffnessMediumLow ≈ 400)
-        // needs ~0.3-0.4s to fully stop, and the card only returns to its
-        // content-hugging info-menu width once the pager reports
-        // !isScrollInProgress — so every swipe left the full-width card
-        // lingering for the whole settle, which users read as "it takes a
-        // second to change the width". stiffness 900 roughly halves that
-        // window without reading as abrupt; the fling decay, single-page
-        // snap distance and positional threshold stay stock.
+        // needs ~0.3-0.4s to fully stop, and the whole time the pager keeps
+        // sliding toward the target page. A stiff snap halves that window so
+        // the island reaches its final geometry sooner; the card size itself
+        // is fraction-driven (see the lerp above) and no longer waits for the
+        // settle, so this only trims the visible slide tail. The fling decay,
+        // single-page snap distance and positional threshold stay stock.
         // remembered so the spec instance is stable and PagerDefaults'
         // internal remember doesn't rebuild the fling behavior per frame.
         val pagerSnapSpec = remember {
@@ -292,19 +339,36 @@ fun IslandExpandedContent(
                 state = pagerState,
                 flingBehavior = pagerFlingBehavior,
                 modifier = Modifier
-                    .fillMaxWidth()
+                    // FIXED VIEWPORT — the core of the freeze fix. The pager
+                    // lays out at the 0.95-screen width on EVERY frame,
+                    // regardless of the card's animated width around it
+                    // (requiredWidth overrides the incoming constraint, the
+                    // card's clip crops the overflow). A viewport that never
+                    // resizes can never re-derive its scroll offsets under a
+                    // live finger, so the pager physically cannot stall.
+                    .requiredWidth(expandedWidth)
                     // unbounded = true: pages measure at natural height even when parent Box has explicit height
-                    .wrapContentHeight(unbounded = true),
+                    .wrapContentHeight(unbounded = true)
+                    // Center the fixed viewport over the (possibly narrower)
+                    // card: the viewport center, the card center and the
+                    // settled page center are then ALWAYS the same point — the
+                    // card is a symmetric clip window over the pager.
+                    .align(Alignment.TopCenter),
                 // TOP-align pages. The pager wraps the height of its tallest
                 // composed page (e.g. a 175dp music page next to the ~60dp
                 // info menu); the default CenterVertically placement made the
                 // short info page ride up/down inside that height as neighbor
                 // page measurements settled — the post-settle vertical drift
                 // of the icon grid. Top-aligned pages never move when other
-                // pages measure.
+                // pages measure, and the top edges of pager and card coincide.
                 verticalAlignment = Alignment.Top
             ) { page ->
                 if (showInfoPage && page == infoPageIndex) {
+                    // The menu content keeps its content-hugging MENU width
+                    // inside the wide page: centered, so when the card shrinks
+                    // to the menu width the clip window shows the tiles
+                    // byte-exactly, and while swiping the menu slides out of
+                    // the widening card like every other page.
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -314,13 +378,20 @@ fun IslandExpandedContent(
                                 if (infoPageHeight != heightDp) {
                                     infoPageHeight = heightDp
                                 }
-                            }
+                            },
+                        contentAlignment = Alignment.TopCenter
                     ) {
-                        IdleInfoExpanded(
-                            settings = settings,
-                            onItemClick = onOpenIdleInfoItem,
-                            feedback = menuFeedback
-                        )
+                        Box(
+                            modifier = Modifier.requiredWidth(
+                                com.agupta07505.smartisland.ui.expanded.idleInfoMenuWidthDp(settings)
+                            )
+                        ) {
+                            IdleInfoExpanded(
+                                settings = settings,
+                                onItemClick = onOpenIdleInfoItem,
+                                feedback = menuFeedback
+                            )
+                        }
                     }
                 } else {
                     val notification = notifications.getOrNull(page - pagerOffset)
