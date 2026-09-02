@@ -164,6 +164,16 @@ fun IslandOverlayView(
         dampingRatio = 1f,
         stiffness = 520f
     )
+    // SHORT size spring (~0.12s, no overshoot) for expanded-domain retargets
+    // that happen with NO gesture in flight — the info-menu width flip only
+    // fires when the pager gate reports the menu active, i.e. the scroll has
+    // fully settled, so a brief shrink reads as a deliberate hug instead of
+    // a one-frame pop. NEVER used while a pager drag can be live (that path
+    // snaps, see the width animation below).
+    val quickSizeSpec = spring<androidx.compose.ui.unit.Dp>(
+        dampingRatio = 1f,
+        stiffness = 1400f
+    )
 
     val safeIndex = selectedIndex.coerceIn(0, (notifications.size - 1).coerceAtLeast(0))
     val activeNotification = notifications.getOrNull(safeIndex)
@@ -322,35 +332,59 @@ fun IslandOverlayView(
 
     val isHiding = isIdleHiding || (settings.autoHidePill && isAutoHidden)
 
-    // Morph targets: the size springs (sizeSpec/heightSpec) are reserved for
-    // the expanded<->collapsed MORPH (initialState != targetState). When the
-    // transition STAYS expanded and only the width/height TARGET changes — the
-    // info-menu card switching between its content-hugging width and the
-    // 0.95-screen-wide card, or the per-frame pager height interpolation —
-    // the value must SNAP. Spring-chasing a retargeted width while the user
-    // is mid-swipe animates the pager's viewport width UNDER THE FINGER: the
-    // pager's pixel-offset math re-derives against a page size that changes
-    // every frame, the page visually stalls ("freezes ~0.5s") and only snaps
-    // into place after the spring settles. A snap happens in one frame at a
-    // drag boundary, where the offset is ~0 and no gesture math is fighting it.
-    val width by transition.animateDp(transitionSpec = {
-        if (initialState == targetState) snap() else sizeSpec
-    }, label = "islandWidth") {
-        if (it) expandedCardWidth else if (isHiding) 0.dp else effectiveWidth.dp
-    }
-    val height by transition.animateDp(transitionSpec = {
-        if (initialState == targetState) snap() else heightSpec
-    }, label = "islandHeight") {
-        if (it) expandedHeight else if (isHiding) 0.dp else effectiveHeight.dp
-    }
-    val yOffset by transition.animateDp(transitionSpec = {
-        if (initialState == targetState) snap() else sizeSpec
-    }, label = "islandYOffset") {
+    // WIDTH/HEIGHT ARE NOT TRANSITION CHILDREN — and that is deliberate.
+    // androidx's Transition re-evaluates transitionSpec() against its current
+    // SEGMENT, and the segment only changes when the transition's STATE
+    // changes (Transition.updateTarget: `if (currentTargetState != targetState)`).
+    // The width/height targets flip between the content-hugging info-menu
+    // size and the 0.95-screen size while the transition STAYS on expanded
+    // (a same-state target-value retarget), so the segment remains
+    // (false -> true) from the last real state change and any
+    // `initialState == targetState` spec branch is evaluated against STALE
+    // states — the intended snap never fired and every flip spring-animated
+    // for ~0.5s: that animated the pager's viewport width UNDER THE FINGER
+    // (the mid-swipe "freeze then snap") and made entering the info menu
+    // take ~1s (full pager settle + the width spring on top).
+    //
+    // animateDpAsState instead re-reads its spec from composition on EVERY
+    // retarget, so the spec chosen below is always the intended one:
+    //   - pill <-> expanded MORPH (morphing) -> the playful springs, and
+    //     every collapsed-domain change keeps them too (slider drags, hide)
+    //   - flip to the info-menu width while expanded -> quickSizeSpec: this
+    //     flip only happens when the pager gate reports the menu active,
+    //     i.e. !isScrollInProgress, so no gesture can fight the resize
+    //   - flip to the wide card while expanded -> snap() in ONE frame: this
+    //     happens at drag START, where a live gesture makes ANY multi-frame
+    //     viewport resize stall the pager's offset math (the original freeze)
+    //   - per-frame pager height interpolation -> quickSizeSpec tracks the
+    //     interpolated target with ~1 frame of smoothing and never jumps
+    //     when a first real measurement lands mid-morph-tail
+    var wasExpanded by remember { mutableStateOf(expanded) }
+    val morphing = expanded != wasExpanded
+    LaunchedEffect(expanded) { wasExpanded = expanded }
+    val widthTarget = if (expanded) expandedCardWidth else if (isHiding) 0.dp else effectiveWidth.dp
+    val heightTarget = if (expanded) expandedHeight else if (isHiding) 0.dp else effectiveHeight.dp
+    val width by animateDpAsState(
+        targetValue = widthTarget,
+        animationSpec = when {
+            morphing || !expanded -> sizeSpec
+            isIdleInfoExpand -> quickSizeSpec
+            else -> snap()
+        },
+        label = "islandWidth"
+    )
+    val height by animateDpAsState(
+        targetValue = heightTarget,
+        animationSpec = if (morphing || !expanded) heightSpec else quickSizeSpec,
+        label = "islandHeight"
+    )
+    // Y offset / radius only retarget when `expanded` itself changes (or a
+    // setting changes while collapsed), so they can safely stay transition
+    // children with their morph springs.
+    val yOffset by transition.animateDp(transitionSpec = { sizeSpec }, label = "islandYOffset") {
         if (it) expandedTopOffset else collapsedWideYDelta
     }
-    val radius by transition.animateDp(transitionSpec = {
-        if (initialState == targetState) snap() else sizeSpec
-    }, label = "islandRadius") {
+    val radius by transition.animateDp(transitionSpec = { sizeSpec }, label = "islandRadius") {
         if (it) 34.dp else if (isHiding) 0.dp else settings.cornerRadius.dp
     }
     // IDLE SHADOW: the tiny cutout-sized idle pill floats on the wallpaper,

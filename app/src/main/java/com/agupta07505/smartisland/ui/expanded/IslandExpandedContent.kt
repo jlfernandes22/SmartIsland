@@ -22,7 +22,10 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.PagerDefaults
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Text
 import androidx.compose.foundation.Image
@@ -258,6 +261,28 @@ fun IslandExpandedContent(
             onHeightMeasured(targetHeight)
         }
 
+        // SNAPPIER SETTLE: the stock snap spring (StiffnessMediumLow ≈ 400)
+        // needs ~0.3-0.4s to fully stop, and the card only returns to its
+        // content-hugging info-menu width once the pager reports
+        // !isScrollInProgress — so every swipe left the full-width card
+        // lingering for the whole settle, which users read as "it takes a
+        // second to change the width". stiffness 900 roughly halves that
+        // window without reading as abrupt; the fling decay, single-page
+        // snap distance and positional threshold stay stock.
+        // remembered so the spec instance is stable and PagerDefaults'
+        // internal remember doesn't rebuild the fling behavior per frame.
+        val pagerSnapSpec = remember {
+            spring<Float>(
+                dampingRatio = Spring.DampingRatioNoBouncy,
+                stiffness = 900f,
+                visibilityThreshold = 1f
+            )
+        }
+        val pagerFlingBehavior = PagerDefaults.flingBehavior(
+            state = pagerState,
+            snapAnimationSpec = pagerSnapSpec
+        )
+
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -265,6 +290,7 @@ fun IslandExpandedContent(
         ) {
             HorizontalPager(
                 state = pagerState,
+                flingBehavior = pagerFlingBehavior,
                 modifier = Modifier
                     .fillMaxWidth()
                     // unbounded = true: pages measure at natural height even when parent Box has explicit height
