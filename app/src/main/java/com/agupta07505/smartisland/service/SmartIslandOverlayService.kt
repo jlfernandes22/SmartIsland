@@ -922,6 +922,9 @@ class SmartIslandOverlayService : AccessibilityService() {
             y = currentY
             softInputMode = currentSoftInputMode
         }
+            // ROUND-Z: keep the full-bleed window pinned to screen-y 0 across
+            // every param update as well (same rationale as collapsedParams).
+            .allowIntoDisplayCutout()
         lastParams = params
         runCatchingLogged(TAG, "Failed to update view layout") { 
             windowManager.updateViewLayout(view, params) 
@@ -994,6 +997,10 @@ class SmartIslandOverlayService : AccessibilityService() {
                 x = 0
                 y = yPx
             }
+                // ROUND-Z: harmless for this small window (its top sits below
+                // the status bar anyway) but keeps both overlay windows on
+                // the same cutout contract.
+                .allowIntoDisplayCutout()
             runCatchingLogged(TAG, "Failed to add pill touch-catcher window") {
                 windowManager.addView(view, params)
                 pillTouchView = view
@@ -1373,6 +1380,27 @@ class SmartIslandOverlayService : AccessibilityService() {
         }
     }
 
+    /**
+     * ROUND-Z POSITION FIX: a full-bleed window (y = 0, MATCH_PARENT) must be
+     * explicitly ALLOWED into the display-cutout area. With the DEFAULT
+     * cutout mode the system lays the window out so its content never
+     * overlaps the cutout/status-bar strip — i.e. the whole window is
+     * effectively pushed DOWN by the status-bar height on the CPH2581 —
+     * while the small pill touch-catcher (whose top edge already sits below
+     * the status bar) keeps its requested y. Result: the drawn island
+     * rendered "some dp below" the punch-hole but taps at the punch-hole
+     * still opened it (visual ≠ touch). MODE_ALWAYS pins window-y 0 to
+     * screen-y 0 so the Compose-side offsets (idleYOffset / yOffset) align
+     * with both the cutout and the touch-catcher again.
+     */
+    private fun WindowManager.LayoutParams.allowIntoDisplayCutout(): WindowManager.LayoutParams {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+            layoutInDisplayCutoutMode =
+                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+        }
+        return this
+    }
+
     private fun collapsedParams(settings: SmartIslandSettings): WindowManager.LayoutParams {
         // TWO-WINDOW ARCHITECTURE: the content window is born MATCH_PARENT in
         // BOTH axes on EVERY device class and is never resized afterwards —
@@ -1402,9 +1430,14 @@ class SmartIslandOverlayService : AccessibilityService() {
             // inside Compose instead, so the pill can never be clipped by
             // the window frame.
             y = 0
-        }.also {
-            lastParams = it
         }
+            // ROUND-Z: opt the full-bleed window into the cutout area —
+            // without this the system shifts the content below the
+            // status bar and the island renders below the punch-hole.
+            .allowIntoDisplayCutout()
+            .also {
+                lastParams = it
+            }
     }
 
     private fun openNotification(notification: IslandNotification) {
