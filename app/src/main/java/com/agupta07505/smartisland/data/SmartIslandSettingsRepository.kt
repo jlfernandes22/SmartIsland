@@ -93,6 +93,7 @@ class SmartIslandSettingsRepository(private val context: Context) {
         val TapAction = stringPreferencesKey("tap_action")
         val IdleTapMode = stringPreferencesKey("idle_tap_mode")
         val IdleInfoShowTime = booleanPreferencesKey("idle_info_show_time")
+        val IdleInfoShowDate = booleanPreferencesKey("idle_info_show_date")
         val IdleInfoShowBattery = booleanPreferencesKey("idle_info_show_battery")
         val IdleInfoShowBluetooth = booleanPreferencesKey("idle_info_show_bluetooth")
         val StatusBarIconsHidden = booleanPreferencesKey("status_bar_icons_hidden")
@@ -251,6 +252,7 @@ class SmartIslandSettingsRepository(private val context: Context) {
                     ?.takeIf { SmartIslandSettings.IdleTapModes.isValid(it) }
                     ?: defaults.idleTapMode,
                 idleInfoShowTime = prefs[Keys.IdleInfoShowTime] ?: defaults.idleInfoShowTime,
+                idleInfoShowDate = prefs[Keys.IdleInfoShowDate] ?: defaults.idleInfoShowDate,
                 idleInfoShowBattery = prefs[Keys.IdleInfoShowBattery] ?: defaults.idleInfoShowBattery,
                 idleInfoShowBluetooth = prefs[Keys.IdleInfoShowBluetooth] ?: defaults.idleInfoShowBluetooth,
                 statusBarIconsHidden = prefs[Keys.StatusBarIconsHidden] ?: defaults.statusBarIconsHidden
@@ -515,6 +517,9 @@ class SmartIslandSettingsRepository(private val context: Context) {
     }
     suspend fun setIdleInfoShowTime(value: Boolean) = editSafely {
         it[Keys.IdleInfoShowTime] = value
+    }
+    suspend fun setIdleInfoShowDate(value: Boolean) = editSafely {
+        it[Keys.IdleInfoShowDate] = value
     }
     suspend fun setIdleInfoShowBattery(value: Boolean) = editSafely {
         it[Keys.IdleInfoShowBattery] = value

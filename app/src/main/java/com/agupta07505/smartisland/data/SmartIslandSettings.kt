@@ -80,6 +80,7 @@ data class SmartIslandSettings(
     val tapAction: String = "TOGGLE",
     val idleTapMode: String = "APPS",
     val idleInfoShowTime: Boolean = true,
+    val idleInfoShowDate: Boolean = true,
     val idleInfoShowBattery: Boolean = true,
     val idleInfoShowBluetooth: Boolean = true,
     val statusBarIconsHidden: Boolean = false

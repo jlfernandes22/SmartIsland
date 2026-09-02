@@ -48,6 +48,7 @@ class SmartIslandSettingsTest {
         assertEquals(SmartIslandSettings.GestureActions.TOGGLE, settings.tapAction)
         assertEquals(SmartIslandSettings.IdleTapModes.APPS, settings.idleTapMode)
         assertEquals(true, settings.idleInfoShowTime)
+        assertEquals(true, settings.idleInfoShowDate)
         assertEquals(true, settings.idleInfoShowBattery)
         assertEquals(true, settings.idleInfoShowBluetooth)
     }

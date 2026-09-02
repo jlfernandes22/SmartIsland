@@ -46,6 +46,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -98,6 +99,37 @@ fun PermissionsSection(
     var statusBarBusy by remember { mutableStateOf(false) }
     var statusBarStatus by remember { mutableStateOf<String?>(null) }
     var statusBarStatusIsError by remember { mutableStateOf(false) }
+
+    // POST-REBOOT CONVERGENCE: the status bar's disable flags are volatile
+    // (the platform clears them on every reboot / SystemUI restart), so with
+    // "hide" saved the icons can still be visible after a boot whenever the
+    // Shizuku server was not up at the moment the boot-time re-apply ran.
+    // Opening the Permissions Center with "hide" saved re-sends the
+    // idempotent hide command once and surfaces the outcome in the same
+    // inline status line the manual switch uses — a failure (e.g. "Shizuku
+    // unavailable") explains exactly why the icons are still visible, so the
+    // toggle never looks stale without saying why. Runs once per section
+    // visit (LaunchedEffect(Unit) semantics), never fights a manual toggle
+    // (statusBarBusy gates the switch while it runs).
+    LaunchedEffect(Unit) {
+        if (!settings.statusBarIconsHidden) return@LaunchedEffect
+        statusBarBusy = true
+        statusBarStatus = null
+        val result = ShizukuManager.sendStatusBarDisableFlags(hide = true)
+        if (result.isSuccess) {
+            statusBarStatusIsError = false
+            statusBarStatus = "Status bar icons hidden"
+        } else {
+            statusBarStatusIsError = true
+            val reason = result.exceptionOrNull()?.message
+            statusBarStatus = if (reason.isNullOrBlank()) {
+                "Couldn't re-hide the icons"
+            } else {
+                "Couldn't re-hide the icons — $reason"
+            }
+        }
+        statusBarBusy = false
+    }
 
     Column(
         modifier = Modifier.fillMaxWidth(),

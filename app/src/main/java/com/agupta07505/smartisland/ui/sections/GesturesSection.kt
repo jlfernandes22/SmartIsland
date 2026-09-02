@@ -235,6 +235,12 @@ fun GesturesSection(
                     )
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f))
                     IdleInfoToggleRow(
+                        label = stringResource(R.string.idle_info_date_title),
+                        checked = settings.idleInfoShowDate,
+                        onCheckedChange = { scope.launch { repository.setIdleInfoShowDate(it) } }
+                    )
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f))
+                    IdleInfoToggleRow(
                         label = stringResource(R.string.idle_info_battery_title),
                         checked = settings.idleInfoShowBattery,
                         onCheckedChange = { scope.launch { repository.setIdleInfoShowBattery(it) } }

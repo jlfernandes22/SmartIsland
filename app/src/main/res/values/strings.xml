@@ -273,7 +273,8 @@
     <string name="idle_tap_behavior_desc">Choose what opens when you tap the pill with no active notifications</string>
     <string name="idle_tap_mode_apps">App Shortcuts</string>
     <string name="idle_tap_mode_info">Info Menu</string>
-    <string name="idle_info_time_title">Show Time &amp; Date</string>
+    <string name="idle_info_time_title">Show Time</string>
+    <string name="idle_info_date_title">Show Date</string>
     <string name="idle_info_battery_title">Show Battery Level</string>
     <string name="idle_info_bluetooth_title">Show Bluetooth Status</string>
     <string name="statusbar_icons_title">Hide status bar icons</string>

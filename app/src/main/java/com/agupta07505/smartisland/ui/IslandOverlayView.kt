@@ -197,6 +197,7 @@ fun IslandOverlayView(
         notifications.isEmpty(),
         settings.idleTapMode,
         settings.idleInfoShowTime,
+        settings.idleInfoShowDate,
         settings.idleInfoShowBattery,
         settings.idleInfoShowBluetooth
     ) {

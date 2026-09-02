@@ -50,6 +50,7 @@ import com.agupta07505.smartisland.util.ShizukuManager
 import com.agupta07505.smartisland.util.runCatchingLogged
 import com.agupta07505.smartisland.util.runSuspendCatchingLogged
 import dagger.hilt.android.AndroidEntryPoint
+import rikka.shizuku.Shizuku
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -495,7 +496,87 @@ class SmartIslandOverlayService : AccessibilityService() {
                 } else {
                     stopOverlaySession()
                 }
+                maybeReapplyStatusBarFlags(settings)
             }
+        }
+    }
+
+    /**
+     * Sticky Shizuku binder listener used by [armStatusBarReapplyOnShizuku].
+     * Registered at most once per service lifetime; removed in onDestroy.
+     */
+    private var statusBarBinderListener: Shizuku.OnBinderReceivedListener? = null
+
+    /**
+     * The status bar's disable flags are VOLATILE: the platform clears every
+     * caller's flags whenever the status bar starts fresh (reboot, SystemUI
+     * restart), so a saved "icons hidden" preference silently stops matching
+     * reality after every boot — the icons come back and the in-app toggle
+     * looks stale. AutostartReceiver re-applies on boot/unlock, but only
+     * while the Shizuku server is ALREADY up; on devices where Shizuku is
+     * started later nothing re-hides the icons. This is the always-alive
+     * fallback: the accessibility service re-sends the idempotent hide
+     * command when it (re)connects — with spaced retries to survive
+     * SystemUI's own startup ordering — and, while Shizuku is still down,
+     * arms a sticky binder listener so the hide fires the moment the Shizuku
+     * server appears. No user action needed anywhere in the chain.
+     */
+    private fun maybeReapplyStatusBarFlags(saved: SmartIslandSettings) {
+        if (!saved.enabled || !saved.statusBarIconsHidden) return
+        val current = if (::viewModel.isInitialized) viewModel.settings.value else saved
+        if (!current.enabled || !current.statusBarIconsHidden) return
+        if (ShizukuManager.hasPermission()) {
+            applyStatusBarHideWithBootRetries()
+        } else {
+            armStatusBarReapplyOnShizuku()
+        }
+    }
+
+    /**
+     * Idempotent hide command sent at 0s / 15s / 45s after the service
+     * connects: a boot-time re-apply that lands while SystemUI is still
+     * settling can be wiped by the platform's own flag reset, so the
+     * spacers close that race. Every attempt re-reads the live setting so a
+     * user-turned-off preference never re-hides anything.
+     */
+    private fun applyStatusBarHideWithBootRetries() {
+        serviceScope.launch {
+            runSuspendCatchingLogged(TAG, "Status bar re-apply failed") {
+                for (waitMs in longArrayOf(0L, 15_000L, 45_000L)) {
+                    if (waitMs > 0) delay(waitMs)
+                    val settings = viewModel.settings.value
+                    if (!settings.enabled || !settings.statusBarIconsHidden) {
+                        return@runSuspendCatchingLogged
+                    }
+                    ShizukuManager.sendStatusBarDisableFlags(hide = true)
+                }
+            }
+        }
+    }
+
+    /**
+     * Arms the sticky Shizuku binder listener for the status-bar re-apply:
+     * fires immediately if the binder is already alive and again whenever
+     * the Shizuku server (re)starts, so "user boots the phone, Shizuku comes
+     * up minutes later" still ends with the icons hidden. The callback is
+     * self-contained (it re-reads the live setting) because the sticky
+     * registration invokes it synchronously before this function returns.
+     */
+    private fun armStatusBarReapplyOnShizuku() {
+        if (statusBarBinderListener != null) return
+        val listener = Shizuku.OnBinderReceivedListener {
+            serviceScope.launch {
+                runSuspendCatchingLogged(TAG, "Status bar re-apply on Shizuku start failed") {
+                    val settings = viewModel.settings.value
+                    if (settings.enabled && settings.statusBarIconsHidden) {
+                        ShizukuManager.sendStatusBarDisableFlags(hide = true)
+                    }
+                }
+            }
+        }
+        runCatchingLogged(TAG, "Shizuku binder listener registration failed") {
+            Shizuku.addBinderReceivedListenerSticky(listener)
+            statusBarBinderListener = listener
         }
     }
 
@@ -526,6 +607,12 @@ class SmartIslandOverlayService : AccessibilityService() {
         if (destroyed) return
         destroyed = true
         isSystemConnected = false
+        statusBarBinderListener?.let {
+            runCatchingLogged(TAG, "removeBinderReceivedListener failed") {
+                Shizuku.removeBinderReceivedListener(it)
+            }
+        }
+        statusBarBinderListener = null
         serviceScope.cancel()
 
         if (::systemEventReceiver.isInitialized && systemEventReceiverRegistered) {
@@ -1857,6 +1944,36 @@ class SmartIslandOverlayService : AccessibilityService() {
                         startActivity(clockIntent, zoomOptions)
                     } else {
                         val fallback = Intent(android.provider.AlarmClock.ACTION_SHOW_TIMERS).apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                        startActivity(fallback, zoomOptions)
+                    }
+                }
+                "date" -> {
+                    openedSomething = true
+                    val calendarPackages = listOf(
+                        "com.google.android.calendar",
+                        "com.android.calendar",
+                        "com.sec.android.app.calendar",
+                        "com.coloros.calendar",
+                        "com.oppo.calendar",
+                        "com.oneplus.calendar",
+                        "com.xiaomi.calendar",
+                        "com.huawei.calendar"
+                    )
+                    val calendarIntent = calendarPackages
+                        .mapNotNull { packageManager.getLaunchIntentForPackage(it) }
+                        .firstOrNull()
+                    if (calendarIntent != null) {
+                        calendarIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        startActivity(calendarIntent, zoomOptions)
+                    } else {
+                        val fallback = Intent(
+                            Intent.ACTION_VIEW,
+                            android.net.Uri.parse(
+                                "content://com.android.calendar/time/" + System.currentTimeMillis()
+                            )
+                        ).apply {
                             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                         }
                         startActivity(fallback, zoomOptions)

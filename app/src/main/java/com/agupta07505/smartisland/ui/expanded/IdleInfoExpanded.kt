@@ -56,6 +56,8 @@ import kotlinx.coroutines.withContext
 
 private data class IdleDeviceState(
     val timeText: String,
+    val dateWeekday: String,
+    val dateText: String,
     val batteryText: String,
     val batteryCharging: Boolean,
     val bluetoothText: String,
@@ -83,6 +85,7 @@ internal const val IdleInfoMaxHeightDp = 250f
 fun idleInfoMenuHeightDp(settings: SmartIslandSettings, availableWidthDp: Float): Dp {
     val tileEnabled = listOf(
         settings.idleInfoShowTime,
+        settings.idleInfoShowDate,
         settings.idleInfoShowBattery,
         settings.idleInfoShowBluetooth
     )
@@ -115,6 +118,7 @@ fun idleInfoMenuHeightDp(settings: SmartIslandSettings, availableWidthDp: Float)
 fun idleInfoMenuWidthDp(settings: SmartIslandSettings): Dp {
     val tileCount = listOf(
         settings.idleInfoShowTime,
+        settings.idleInfoShowDate,
         settings.idleInfoShowBattery,
         settings.idleInfoShowBluetooth
     ).count { it }
@@ -150,7 +154,7 @@ fun IdleInfoExpanded(
     // Battery/Bluetooth reads are binder + reflection probes; run them on IO
     // so the 1s menu refresh never janks the overlay's main thread.
     val state by produceState(
-        initialValue = IdleDeviceState("", "", false, "", false)
+        initialValue = IdleDeviceState("", "", "", "", false, "", false)
     ) {
         while (true) {
             value = withContext(Dispatchers.IO) {
@@ -178,6 +182,14 @@ fun IdleInfoExpanded(
             if (settings.idleInfoShowTime) {
                 TimeTile(timeText = state.timeText.ifEmpty { "--:--" }) {
                     onItemClick(IDLE_ITEM_TIME)
+                }
+            }
+            if (settings.idleInfoShowDate) {
+                DateTile(
+                    dateWeekday = state.dateWeekday.ifEmpty { "---" },
+                    dateText = state.dateText.ifEmpty { "-- ---" }
+                ) {
+                    onItemClick(IDLE_ITEM_DATE)
                 }
             }
             if (settings.idleInfoShowBattery) {
@@ -208,6 +220,7 @@ fun IdleInfoExpanded(
         }
 
         if (!settings.idleInfoShowTime &&
+            !settings.idleInfoShowDate &&
             !settings.idleInfoShowBattery &&
             !settings.idleInfoShowBluetooth
         ) {
@@ -238,6 +251,7 @@ fun IdleInfoExpanded(
 }
 
 const val IDLE_ITEM_TIME = "time"
+const val IDLE_ITEM_DATE = "date"
 const val IDLE_ITEM_BATTERY = "battery"
 const val IDLE_ITEM_BLUETOOTH = "bluetooth"
 
@@ -263,6 +277,42 @@ private fun TimeTile(timeText: String, onClick: () -> Unit) {
             fontWeight = FontWeight.SemiBold,
             textAlign = TextAlign.Center
         )
+    }
+}
+
+/**
+ * Date tile: two-line readout (weekday / day-month) on the same 44dp grid.
+ * Weekday carries the accent so the tile reads as a sibling of the clock
+ * tile, not a second battery percentage. Tap opens the calendar app
+ * (service-side behavior) while the clock tile keeps opening the clock app.
+ */
+@Composable
+private fun DateTile(dateWeekday: String, dateText: String, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .width(TileSize)
+            .height(TileSize)
+            .clip(RoundedCornerShape(TileCorner))
+            .background(Color.White.copy(alpha = 0.05f))
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(
+                text = dateWeekday,
+                color = AccentTime,
+                fontSize = 9.sp,
+                fontWeight = FontWeight.Medium,
+                textAlign = TextAlign.Center
+            )
+            Text(
+                text = dateText,
+                color = Color.White,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.SemiBold,
+                textAlign = TextAlign.Center
+            )
+        }
     }
 }
 
@@ -349,6 +399,9 @@ private fun ToggleTile(
 private fun readDeviceState(context: Context): IdleDeviceState {
     val now = System.currentTimeMillis()
     val timeText = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(now))
+    val dateWeekday = SimpleDateFormat("EEE", Locale.getDefault())
+        .format(Date(now)).uppercase(Locale.getDefault())
+    val dateText = SimpleDateFormat("d MMM", Locale.getDefault()).format(Date(now))
 
     var batteryText = "--"
     var batteryCharging = false
@@ -410,6 +463,8 @@ private fun readDeviceState(context: Context): IdleDeviceState {
 
     return IdleDeviceState(
         timeText = timeText,
+        dateWeekday = dateWeekday,
+        dateText = dateText,
         batteryText = batteryText,
         batteryCharging = batteryCharging,
         bluetoothText = bluetoothText,
